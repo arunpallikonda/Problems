@@ -57,17 +57,17 @@ public class DoublyLinkedList {
             Node currentNode = tail;
 
             while (currentNode != null) {
-                if(currentNode.data == data) {
+                if (currentNode.data == data) {
                     if (currentNode == tail) {
                         tail = tail.prev;
-                        if(tail == null) {
+                        if (tail == null) {
                             head = null;
                         } else {
                             tail.next = null;
                         }
                     } else if (currentNode == head) {
                         head = head.next;
-                        if(head == null) {
+                        if (head == null) {
                             tail = null;
                         } else {
                             head.prev = null;
