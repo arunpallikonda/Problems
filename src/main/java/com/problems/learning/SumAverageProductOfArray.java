@@ -1,4 +1,4 @@
-package problems;
+package com.problems.learning;
 
 public class SumAverageProductOfArray {
 

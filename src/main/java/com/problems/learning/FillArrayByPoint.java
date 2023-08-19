@@ -1,4 +1,4 @@
-package problems;
+package com.problems.learning;
 
 import java.awt.*;
 import java.util.Arrays;
