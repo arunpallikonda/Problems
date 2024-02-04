@@ -193,3 +193,160 @@ public class KafkaParallelConsumer {
     }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+------------
+
+
+    import io.reactivex.Observable;
+import io.reactivex.schedulers.Schedulers;
+import org.apache.kafka.clients.consumer.*;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.clients.producer.*;
+import org.apache.kafka.common.serialization.StringSerializer;
+
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class KafkaDBComparisonApp {
+
+    public static void main(String[] args) {
+        String kafkaTopic = "your_kafka_topic";
+        String db2Query = "SELECT * FROM your_table";
+        String keyField = "your_key_field";
+
+        Properties kafkaProps = new Properties();
+        kafkaProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "your_kafka_bootstrap_servers");
+        kafkaProps.put(ConsumerConfig.GROUP_ID_CONFIG, "consumer-group");
+        kafkaProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        kafkaProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        Properties producerProps = new Properties();
+        producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "your_kafka_bootstrap_servers");
+        producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+
+        // Create Kafka consumer
+        KafkaConsumer<String, String> kafkaConsumer = new KafkaConsumer<>(kafkaProps);
+        kafkaConsumer.subscribe(Collections.singletonList(kafkaTopic));
+
+        // Create Kafka producer for success and failure outputs
+        KafkaProducer<String, String> successProducer = new KafkaProducer<>(producerProps);
+        KafkaProducer<String, String> failureProducer = new KafkaProducer<>(producerProps);
+
+        // Create a DB2 pagination observable
+        AtomicInteger currentPage = new AtomicInteger(0);
+        int pageSize = 1000; // Set your preferred page size
+        Observable<List<ProtoObject>> db2Observable = Observable.create(emitter -> {
+            boolean hasNextPage = true;
+            while (hasNextPage) {
+                List<ProtoObject> db2Results = fetchDataFromDB2(db2Query, currentPage.getAndIncrement(), pageSize);
+                if (db2Results.isEmpty()) {
+                    hasNextPage = false;
+                } else {
+                    emitter.onNext(db2Results);
+                }
+            }
+            emitter.onComplete();
+        }).subscribeOn(Schedulers.io());
+
+        // Create a Kafka observable for ProtoObject deserialization
+        Observable<ProtoObject> kafkaObservable = Observable.create(emitter -> {
+            while (true) {
+                ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                for (ConsumerRecord<String, String> record : records) {
+                    // Deserialize ByteBuffer into ProtoObject
+                    ProtoObject protoObject = deserializeProtoObject(record.value());
+                    emitter.onNext(protoObject);
+                }
+            }
+        }).subscribeOn(Schedulers.io());
+
+        // Combine the two observables based on the key field
+        Observable<Pair<ProtoObject, List<ProtoObject>>> combinedObservable = Observable.combineLatest(
+            kafkaObservable.groupBy(ProtoObject::getKey),
+            db2Observable.groupBy(ProtoObject::getKey),
+            (kafkaGroup, db2Group) -> {
+                Pair<ProtoObject, List<ProtoObject>> pair = new Pair<>();
+                kafkaGroup.subscribe(pair::setFirst);
+                db2Group.subscribe(pair::setSecond);
+                return pair;
+            }
+        );
+
+        // Process and compare ProtoObjects, then write to success or failure Kafka topic
+        combinedObservable.subscribe(pair -> {
+            ProtoObject kafkaProto = pair.getFirst();
+            List<ProtoObject> db2Protos = pair.getSecond();
+
+            boolean isMatch = false;
+
+            for (ProtoObject db2Proto : db2Protos) {
+                if (compareProtoObjects(kafkaProto, db2Proto)) {
+                    isMatch = true;
+                    break;
+                }
+            }
+
+            if (isMatch) {
+                // Write to success Kafka topic
+                successProducer.send(new ProducerRecord<>("success_topic", kafkaProto.getKey(), kafkaProto.toString()));
+            } else {
+                // Write to failure Kafka topic
+                failureProducer.send(new ProducerRecord<>("failure_topic", kafkaProto.getKey(), kafkaProto.toString()));
+            }
+        });
+    }
+
+    // Implement this method to fetch data from DB2 using pagination
+    private static List<ProtoObject> fetchDataFromDB2(String query, int page, int pageSize) {
+        // Implement database query and pagination logic
+        // Return a list of ProtoObjects for the given page
+        return Collections.emptyList(); // Placeholder
+    }
+
+    // Implement this method to deserialize ByteBuffer into ProtoObject
+    private static ProtoObject deserializeProtoObject(String serializedData) {
+        // Deserialize the data and return a ProtoObject
+        return new ProtoObject(); // Placeholder
+    }
+
+    // Implement this method to compare two ProtoObjects
+    private static boolean compareProtoObjects(ProtoObject proto1, ProtoObject proto2) {
+        // Implement comparison logic
+        return false; // Placeholder
+    }
+
+    static class Pair<A, B> {
+        private A first;
+        private B second;
+
+        public A getFirst() {
+            return first;
+        }
+
+        public void setFirst(A first) {
+            this.first = first;
+        }
+
+        public B getSecond() {
+            return second;
+        }
+
+        public void setSecond(B second) {
+            this.second = second;
+        }
+    }
+}
+
