@@ -131,3 +131,65 @@ public class DataProcessorApp {
         }).subscribeOn(Schedulers.io());
     }
 }
+
+
+
+import io.reactivex.rxjava3.core.Observable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
+
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
+
+public class KafkaParallelConsumer {
+
+    private static List<Observable<ConsumerRecord<String, byte[]>>> createPartitionObservables(String topicName, Properties props) {
+        // Temporary consumer to get partition info
+        KafkaConsumer<String, byte[]> tempConsumer = new KafkaConsumer<>(props);
+        tempConsumer.subscribe(Arrays.asList(topicName));
+        List<PartitionInfo> partitions = tempConsumer.partitionsFor(topicName);
+        tempConsumer.close();
+
+        // Create an observable for each partition
+        return partitions.stream().map(partitionInfo -> {
+            TopicPartition topicPartition = new TopicPartition(topicName, partitionInfo.partition());
+            return Observable.<ConsumerRecord<String, byte[]>>create(emitter -> {
+                KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
+                consumer.assign(Collections.singletonList(topicPartition));
+
+                while (!emitter.isDisposed()) {
+                    consumer.poll(Duration.ofMillis(100)).forEach(emitter::onNext);
+                }
+                consumer.close();
+            }).subscribeOn(Schedulers.from(Executors.newSingleThreadExecutor())); // Use a single thread executor for each partition
+        }).collect(Collectors.toList());
+    }
+
+    public static Observable<ConsumerRecord<String, byte[]>> createKafkaObservable(String topicName, Properties props) {
+        List<Observable<ConsumerRecord<String, byte[]>>> partitionObservables = createPartitionObservables(topicName, props);
+        // Merge all partition observables into one observable
+        return Observable.merge(partitionObservables);
+    }
+
+    public static void main(String[] args) {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "your.kafka.server:9092");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "your-consumer-group");
+
+        Observable<ConsumerRecord<String, byte[]>> kafkaObservable = createKafkaObservable("YourTopicName", props);
+
+        kafkaObservable.subscribe(record -> {
+            // Process each record
+            System.out.println("Received: " + record);
+        }, Throwable::printStackTrace);
+    }
+}
+
