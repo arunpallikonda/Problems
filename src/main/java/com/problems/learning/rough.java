@@ -350,3 +350,65 @@ public class KafkaDBComparisonApp {
     }
 }
 
+
+
+
+
+
+
+
+import os
+import requests
+import zipfile
+import json
+
+def download_and_call_api(nexus_url, api_url):
+    # Download the zip file from Nexus
+    response = requests.get(nexus_url)
+    if response.status_code != 200:
+        print("Failed to download the zip file from Nexus.")
+        return
+
+    # Create a temporary directory to extract the zip file
+    temp_dir = "temp_zip_extraction"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # Save the downloaded zip file
+    zip_file_path = os.path.join(temp_dir, "downloaded_zip.zip")
+    with open(zip_file_path, "wb") as f:
+        f.write(response.content)
+
+    # Extract the zip file
+    with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+
+    # Read the JSON file from the extracted zip
+    json_file_path = os.path.join(temp_dir, "*.json")
+    json_files = [f for f in os.listdir(temp_dir) if f.endswith('.json')]
+    if len(json_files) != 1:
+        print("Expected one JSON file in the zip, but found", len(json_files))
+        return
+    json_file_path = os.path.join(temp_dir, json_files[0])
+
+    # Load the JSON data
+    with open(json_file_path) as json_file:
+        payload = json.load(json_file)
+
+    # Call the API with the payload
+    api_response = requests.post(api_url, json=payload)
+    if api_response.status_code == 200:
+        print("API call successful.")
+        print("Response:", api_response.json())
+    else:
+        print("API call failed with status code:", api_response.status_code)
+
+    # Clean up temporary files
+    os.remove(zip_file_path)
+    os.remove(json_file_path)
+    os.rmdir(temp_dir)
+
+# Example usage:
+nexus_url = "https://example.com/path/to/your/zip/file.zip"
+api_url = "https://api.example.com/endpoint"
+download_and_call_api(nexus_url, api_url)
+
