@@ -1,57 +1,92 @@
-import java.io.*;
+import java.util.*;
 import java.util.concurrent.*;
-import java.util.zip.GZIPInputStream;
 
-public class GzipFileReader {
+public class MultiThreadedQueueProcessor {
 
-    private static final int CHUNK_SIZE = 1024 * 1024; // 1 MB chunks
+    private static final int QUEUE_CAPACITY = 100;
+    private static final int NUM_PRODUCERS = 5;
+    private static final int NUM_CONSUMERS = 5;
 
-    public static void main(String[] args) throws Exception {
-        File file = new File("path/to/your/file.gz");
-        int numThreads = Runtime.getRuntime().availableProcessors();
-        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
-        BlockingQueue<Runnable> tasks = new LinkedBlockingQueue<>();
+    public static void main(String[] args) throws InterruptedException {
+        BlockingQueue<String> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+        List<List<String>> lists = Collections.synchronizedList(new ArrayList<>());
 
-        try (GZIPInputStream gis = new GZIPInputStream(new FileInputStream(file));
-             BufferedInputStream bis = new BufferedInputStream(gis)) {
+        ExecutorService producerExecutor = Executors.newFixedThreadPool(NUM_PRODUCERS);
+        ExecutorService consumerExecutor = Executors.newFixedThreadPool(NUM_CONSUMERS);
 
-            byte[] buffer = new byte[CHUNK_SIZE];
-            int bytesRead;
-            while ((bytesRead = bis.read(buffer)) != -1) {
-                byte[] chunk = new byte[bytesRead];
-                System.arraycopy(buffer, 0, chunk, 0, bytesRead);
-                tasks.add(new ChunkProcessor(chunk));
-            }
+        // Create and start producer threads
+        for (int i = 0; i < NUM_PRODUCERS; i++) {
+            producerExecutor.submit(new Producer(queue, "Producer-" + i));
         }
 
-        List<Future<?>> futures = new ArrayList<>();
-        while (!tasks.isEmpty()) {
-            futures.add(executor.submit(tasks.poll()));
+        // Create and start consumer threads
+        for (int i = 0; i < NUM_CONSUMERS; i++) {
+            consumerExecutor.submit(new Consumer(queue, lists));
         }
 
-        for (Future<?> future : futures) {
-            future.get(); // wait for all tasks to complete
-        }
+        // Shutdown executors after some time
+        producerExecutor.shutdown();
+        consumerExecutor.shutdown();
 
-        executor.shutdown();
+        producerExecutor.awaitTermination(1, TimeUnit.MINUTES);
+        consumerExecutor.awaitTermination(1, TimeUnit.MINUTES);
+
+        // Print the results
+        for (List<String> list : lists) {
+            System.out.println("List size: " + list.size());
+        }
     }
 
-    static class ChunkProcessor implements Runnable {
-        private final byte[] chunk;
+    static class Producer implements Runnable {
+        private final BlockingQueue<String> queue;
+        private final String name;
 
-        ChunkProcessor(byte[] chunk) {
-            this.chunk = chunk;
+        Producer(BlockingQueue<String> queue, String name) {
+            this.queue = queue;
+            this.name = name;
         }
 
         @Override
         public void run() {
-            // Process the chunk
-            processChunk(chunk);
+            try {
+                for (int i = 0; i < 100; i++) {
+                    String data = name + "-Data-" + i;
+                    queue.put(data);
+                    System.out.println(name + " produced: " + data);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    static class Consumer implements Runnable {
+        private final BlockingQueue<String> queue;
+        private final List<List<String>> lists;
+
+        Consumer(BlockingQueue<String> queue, List<List<String>> lists) {
+            this.queue = queue;
+            this.lists = lists;
         }
 
-        private void processChunk(byte[] chunk) {
-            // Implement your processing logic here
-            System.out.println("Processing chunk of size: " + chunk.length);
+        @Override
+        public void run() {
+            List<String> localList = new ArrayList<>();
+            try {
+                while (true) {
+                    String data = queue.take();
+                    localList.add(data);
+                    System.out.println(Thread.currentThread().getName() + " consumed: " + data);
+                    if (localList.size() >= 50) {
+                        synchronized (lists) {
+                            lists.add(new ArrayList<>(localList));
+                        }
+                        localList.clear();
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
