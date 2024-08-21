@@ -15,14 +15,14 @@ data = [
 
 # Prepare the HTML table
 html_table = '''
-<table border="1" style="border-collapse: collapse; width: 100%;">
+<table border="1" style="border-collapse: collapse; width: 100%; table-layout: fixed;">
     <thead>
         <tr>
             <th style="padding: 8px;">Request ID</th>
             <th style="padding: 8px;">Status</th>
             <th style="padding: 8px;">Type</th>
-            <th style="padding: 8px;">Source ARN</th>
-            <th style="padding: 8px;">Target ARN</th>
+            <th style="padding: 8px; word-wrap: break-word; width: 300px;">Source ARN</th>
+            <th style="padding: 8px; word-wrap: break-word; width: 300px;">Target ARN</th>
         </tr>
     </thead>
     <tbody>
@@ -31,11 +31,11 @@ html_table = '''
 for entry in data:
     html_table += f'''
     <tr>
-        <td style="padding: 8px; color: red;">{entry["request_id"]}</td>
+        <td style="padding: 8px; color: red; word-wrap: break-word;">{entry["request_id"]}</td>
         <td style="padding: 8px;">{entry["status"]}</td>
         <td style="padding: 8px;">{entry["type"]}</td>
-        <td style="padding: 8px;">{entry["source_arn"]}</td>
-        <td style="padding: 8px;">{entry["target_arn"]}</td>
+        <td style="padding: 8px; word-wrap: break-word;">{entry["source_arn"]}</td>
+        <td style="padding: 8px; word-wrap: break-word;">{entry["target_arn"]}</td>
     </tr>
     '''
 
