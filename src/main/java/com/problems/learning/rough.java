@@ -1,92 +1,62 @@
-import java.util.*;
-import java.util.concurrent.*;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.Callback;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.TimeoutException;
 
-public class MultiThreadedQueueProcessor {
+import java.util.Properties;
 
-    private static final int QUEUE_CAPACITY = 100;
-    private static final int NUM_PRODUCERS = 5;
-    private static final int NUM_CONSUMERS = 5;
+public class KafkaProducerWithRetry {
 
-    public static void main(String[] args) throws InterruptedException {
-        BlockingQueue<String> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
-        List<List<String>> lists = Collections.synchronizedList(new ArrayList<>());
+    private static final int MAX_RETRIES = 5;
+    private static final long RETRY_INTERVAL_MS = 1000; // 1 second
 
-        ExecutorService producerExecutor = Executors.newFixedThreadPool(NUM_PRODUCERS);
-        ExecutorService consumerExecutor = Executors.newFixedThreadPool(NUM_CONSUMERS);
+    public static void main(String[] args) {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
 
-        // Create and start producer threads
-        for (int i = 0; i < NUM_PRODUCERS; i++) {
-            producerExecutor.submit(new Producer(queue, "Producer-" + i));
-        }
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props);
 
-        // Create and start consumer threads
-        for (int i = 0; i < NUM_CONSUMERS; i++) {
-            consumerExecutor.submit(new Consumer(queue, lists));
-        }
+        String topic = "my-topic";
+        String key = "my-key";
+        String value = "my-message";
 
-        // Shutdown executors after some time
-        producerExecutor.shutdown();
-        consumerExecutor.shutdown();
-
-        producerExecutor.awaitTermination(1, TimeUnit.MINUTES);
-        consumerExecutor.awaitTermination(1, TimeUnit.MINUTES);
-
-        // Print the results
-        for (List<String> list : lists) {
-            System.out.println("List size: " + list.size());
-        }
+        sendMessageWithRetry(producer, topic, key, value, 0);
     }
 
-    static class Producer implements Runnable {
-        private final BlockingQueue<String> queue;
-        private final String name;
-
-        Producer(BlockingQueue<String> queue, String name) {
-            this.queue = queue;
-            this.name = name;
-        }
-
-        @Override
-        public void run() {
-            try {
-                for (int i = 0; i < 100; i++) {
-                    String data = name + "-Data-" + i;
-                    queue.put(data);
-                    System.out.println(name + " produced: " + data);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    static class Consumer implements Runnable {
-        private final BlockingQueue<String> queue;
-        private final List<List<String>> lists;
-
-        Consumer(BlockingQueue<String> queue, List<List<String>> lists) {
-            this.queue = queue;
-            this.lists = lists;
-        }
-
-        @Override
-        public void run() {
-            List<String> localList = new ArrayList<>();
-            try {
-                while (true) {
-                    String data = queue.take();
-                    localList.add(data);
-                    System.out.println(Thread.currentThread().getName() + " consumed: " + data);
-                    if (localList.size() >= 50) {
-                        synchronized (lists) {
-                            lists.add(new ArrayList<>(localList));
+    public static void sendMessageWithRetry(KafkaProducer<String, String> producer, String topic, String key, String value, int attempt) {
+        producer.send(new ProducerRecord<>(topic, key, value), new Callback() {
+            @Override
+            public void onCompletion(RecordMetadata metadata, Exception exception) {
+                if (exception == null) {
+                    // Message sent successfully
+                    System.out.println("Message sent successfully: " + metadata.toString());
+                } else {
+                    // Message failed to send
+                    if (exception instanceof RetriableException || exception instanceof TimeoutException) {
+                        // Retry logic for retriable exceptions
+                        if (attempt < MAX_RETRIES) {
+                            System.out.println("Retrying to send message, attempt " + (attempt + 1));
+                            try {
+                                Thread.sleep(RETRY_INTERVAL_MS);
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                                Thread.currentThread().interrupt();
+                            }
+                            sendMessageWithRetry(producer, topic, key, value, attempt + 1);
+                        } else {
+                            System.err.println("Failed to send message after " + MAX_RETRIES + " attempts");
                         }
-                        localList.clear();
+                    } else {
+                        // Non-retriable exception, log the error
+                        System.err.println("Failed to send message due to non-retriable exception: " + exception.getMessage());
                     }
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
-        }
+        });
     }
 }
