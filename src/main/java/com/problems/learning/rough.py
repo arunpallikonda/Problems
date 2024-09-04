@@ -1,37 +1,52 @@
-import os
-import random
-import string
 import boto3
+from concurrent.futures import ThreadPoolExecutor
 
-def generate_random_string(size_in_bytes):
-    """Generate a random string of a specific size."""
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=size_in_bytes))
+# Initialize the S3 client
+s3 = boto3.client('s3')
 
-def upload_random_files_to_s3(prefix, min_size, max_size, total_size, bucket_name):
-    s3 = boto3.client('s3')
-    current_total_size = 0
-    file_counter = 1
+def delete_objects(bucket_name, objects):
+    """Delete a batch of objects."""
+    if objects:
+        response = s3.delete_objects(
+            Bucket=bucket_name,
+            Delete={
+                'Objects': [{'Key': obj} for obj in objects]
+            }
+        )
+        print(f"Deleted {len(response.get('Deleted', []))} objects.")
+    else:
+        print("No objects to delete.")
 
-    while current_total_size < total_size:
-        file_size = random.randint(min_size, max_size)
-        if current_total_size + file_size > total_size:
-            file_size = total_size - current_total_size
+def list_objects(bucket_name, prefix, max_keys=1000):
+    """List objects in a bucket with a specific prefix."""
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix, PaginationConfig={'MaxItems': max_keys}):
+        yield from (obj['Key'] for obj in page.get('Contents', []))
 
-        file_content = generate_random_string(file_size)
-        file_name = f"{prefix}/file_{file_counter}.txt"
-        s3.put_object(Bucket=bucket_name, Key=file_name, Body=file_content)
+def main(bucket_name, prefix):
+    """Main function to delete objects from the S3 bucket."""
+    batch_size = 1000
+    objects_to_delete = []
+    
+    # Process objects in batches
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for obj_key in list_objects(bucket_name, prefix):
+            objects_to_delete.append(obj_key)
+            if len(objects_to_delete) >= batch_size:
+                # Submit batch delete task
+                futures.append(executor.submit(delete_objects, bucket_name, objects_to_delete))
+                objects_to_delete = []
+        
+        # Submit the last batch if any
+        if objects_to_delete:
+            futures.append(executor.submit(delete_objects, bucket_name, objects_to_delete))
+        
+        # Wait for all tasks to complete
+        for future in futures:
+            future.result()
 
-        current_total_size += file_size
-        file_counter += 1
-        print(f"Uploaded {file_name} with size {file_size} bytes. Total uploaded: {current_total_size} bytes.")
-
-    print(f"Total size of all files uploaded: {current_total_size} bytes.")
-
-# Example usage
-prefixOfS3 = 'your/prefix'
-minimumSizeOfFile = 150 * 1024 * 1024  # 150 MB
-maximumSizeOfFile = 500 * 1024 * 1024  # 500 MB
-totalSizeOfAllFilesCombined = 100 * 1024 * 1024 * 1024  # 100 GB
-bucket_name = 'your-bucket-name'
-
-upload_random_files_to_s3(prefixOfS3, minimumSizeOfFile, maximumSizeOfFile, totalSizeOfAllFilesCombined, bucket_name)
+if __name__ == "__main__":
+    bucket_name = 'your-bucket-name'
+    prefix = 'your/folder/prefix/'  # Make sure to include the trailing slash
+    main(bucket_name, prefix)
