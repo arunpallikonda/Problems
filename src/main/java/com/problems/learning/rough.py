@@ -1,52 +1,78 @@
 import boto3
-from concurrent.futures import ThreadPoolExecutor
+import os
+import time
 
-# Initialize the S3 client
+# Initialize clients
 s3 = boto3.client('s3')
+dynamodb = boto3.client('dynamodb')
+table_name = os.environ['DYNAMODB_TABLE']
+source_bucket = os.environ['SOURCE_BUCKET']
+destination_bucket = os.environ['DESTINATION_BUCKET']
+batch_size = 1000  # Adjust batch size based on your needs
 
-def delete_objects(bucket_name, objects):
-    """Delete a batch of objects."""
-    if objects:
-        response = s3.delete_objects(
-            Bucket=bucket_name,
-            Delete={
-                'Objects': [{'Key': obj} for obj in objects]
-            }
-        )
-        print(f"Deleted {len(response.get('Deleted', []))} objects.")
-    else:
-        print("No objects to delete.")
+def lambda_handler(event, context):
+    # Read prefix from the event or environment
+    prefix = event.get('prefix', None)
+    if not prefix:
+        return {'statusCode': 400, 'body': 'Prefix is required'}
 
-def list_objects(bucket_name, prefix, max_keys=1000):
-    """List objects in a bucket with a specific prefix."""
-    paginator = s3.get_paginator('list_objects_v2')
-    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix, PaginationConfig={'MaxItems': max_keys}):
-        yield from (obj['Key'] for obj in page.get('Contents', []))
-
-def main(bucket_name, prefix):
-    """Main function to delete objects from the S3 bucket."""
-    batch_size = 1000
-    objects_to_delete = []
+    # Retrieve the next token from DynamoDB
+    next_token = get_next_token(prefix)
     
-    # Process objects in batches
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = []
-        for obj_key in list_objects(bucket_name, prefix):
-            objects_to_delete.append(obj_key)
-            if len(objects_to_delete) >= batch_size:
-                # Submit batch delete task
-                futures.append(executor.submit(delete_objects, bucket_name, objects_to_delete))
-                objects_to_delete = []
+    # Copy objects
+    copied_count = copy_objects(prefix, next_token)
+    
+    # If there are more objects to copy, update DynamoDB and trigger the next Lambda
+    if copied_count == batch_size:
+        # Save next token to DynamoDB
+        save_next_token(prefix, next_token)
+        # You may need to invoke the next Lambda function here if needed
         
-        # Submit the last batch if any
-        if objects_to_delete:
-            futures.append(executor.submit(delete_objects, bucket_name, objects_to_delete))
-        
-        # Wait for all tasks to complete
-        for future in futures:
-            future.result()
+    return {'statusCode': 200, 'body': f'Copied {copied_count} objects'}
 
-if __name__ == "__main__":
-    bucket_name = 'your-bucket-name'
-    prefix = 'your/folder/prefix/'  # Make sure to include the trailing slash
-    main(bucket_name, prefix)
+def get_next_token(prefix):
+    """Retrieve the next token from DynamoDB."""
+    response = dynamodb.get_item(
+        TableName=table_name,
+        Key={'prefix': {'S': prefix}}
+    )
+    return response.get('Item', {}).get('next_token', {}).get('S', '')
+
+def save_next_token(prefix, next_token):
+    """Save the next token to DynamoDB."""
+    dynamodb.put_item(
+        TableName=table_name,
+        Item={
+            'prefix': {'S': prefix},
+            'next_token': {'S': next_token}
+        }
+    )
+
+def copy_objects(prefix, start_after):
+    """Copy objects in batches."""
+    paginator = s3.get_paginator('list_objects_v2')
+    copied_count = 0
+
+    for page in paginator.paginate(Bucket=source_bucket, Prefix=prefix, StartAfter=start_after):
+        for obj in page.get('Contents', []):
+            copy_source = {'Bucket': source_bucket, 'Key': obj['Key']}
+            destination_key = obj['Key'].replace(prefix, prefix, 1)
+            s3.copy_object(CopySource=copy_source, Bucket=destination_bucket, Key=destination_key)
+            copied_count += 1
+            
+            # Check remaining Lambda execution time
+            if get_remaining_time(context) < 60:
+                # Save the next token and return before timeout
+                return copied_count
+                
+        # If we've processed a batch, update the next token
+        last_key = page.get('Contents', [-1])['Key'] if page.get('Contents') else ''
+        if copied_count >= batch_size:
+            save_next_token(prefix, last_key)
+            break
+
+    return copied_count
+
+def get_remaining_time(context):
+    """Get the remaining time before Lambda times out."""
+    return context.get_remaining_time_in_millis() / 1000
