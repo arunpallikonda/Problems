@@ -1,115 +1,146 @@
-import boto3
-import os
-import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+import time
+import psycopg
+from psycopg.rows import dict_row
 
-# Initialize clients
-s3 = boto3.client('s3')
-dynamodb = boto3.client('dynamodb')
-table_name = os.environ['DYNAMODB_TABLE']
-source_bucket = os.environ['SOURCE_BUCKET']
-destination_bucket = os.environ['DESTINATION_BUCKET']
-batch_size = 1000  # Adjust batch size based on your needs
-max_threads = 10   # Number of threads to use
+CHECK_INTERVAL = 30  # Check every 30 seconds
+MAX_WAIT_TIME = 900  # 15 minutes
 
-# Initialize a lock for thread-safe updates
-lock = Lock()
-last_key = None
+class RedshiftS3Loader:
+    def __init__(self, host, db, user, password, iam_role):
+        self.host = host
+        self.db = db
+        self.user = user
+        self.password = password
+        self.iam_role = iam_role
 
-def lambda_handler(event, context):
-    global last_key
-    # Read prefix from the event or environment
-    prefix = event.get('prefix', None)
-    if not prefix:
-        return {'statusCode': 400, 'body': 'Prefix is required'}
+    def get_redshift_connection(self):
+        """Returns a psycopg connection object."""
+        return psycopg.connect(
+            host=self.host,
+            dbname=self.db,
+            user=self.user,
+            password=self.password,
+            row_factory=dict_row
+        )
 
-    # Retrieve the next token from DynamoDB
-    next_token = get_next_token(prefix)
-    
-    # Copy objects
-    copied_count, last_key = copy_objects(prefix, next_token, context)
-    
-    # Save last_key to DynamoDB if necessary
-    if copied_count == batch_size:
-        # Ensure last_key is updated by all threads before saving
-        if last_key:
-            save_next_token(prefix, last_key)
+    def initiate_unload_to_s3(self, schema_name, table_name, s3_staging_location):
+        """Initiates UNLOAD command asynchronously."""
+        s3_path = f"{s3_staging_location}{schema_name}/{table_name}/"
+        
+        unload_sql = f"""
+        UNLOAD ('SELECT * FROM {schema_name}.{table_name}')
+        TO '{s3_path}'
+        IAM_ROLE '{self.iam_role}'
+        FORMAT AS PARQUET;
+        """
 
-    return {'statusCode': 200, 'body': f'Copied {copied_count} objects'}
+        try:
+            with self.get_redshift_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(unload_sql)
+                    print(f"UNLOAD initiated for {schema_name}.{table_name} to {s3_path}")
+        except Exception as e:
+            print(f"Error initiating UNLOAD: {e}")
 
-def get_next_token(prefix):
-    """Retrieve the next token from DynamoDB."""
-    response = dynamodb.get_item(
-        TableName=table_name,
-        Key={'prefix': {'S': prefix}}
-    )
-    return response.get('Item', {}).get('next_token', {}).get('S', '')
+    def check_unload_status(self, s3_staging_location):
+        """Checks if the UNLOAD operation for the specific S3 location and IAM role is completed."""
+        check_sql = f"""
+        SELECT pid, query, state, elapsed 
+        FROM STL_QUERY 
+        WHERE querytxt ILIKE 'UNLOAD%' 
+          AND querytxt ILIKE '%{s3_staging_location}%' 
+          AND querytxt ILIKE '%{self.iam_role}%'
+        ORDER BY starttime DESC 
+        LIMIT 1;
+        """
 
-def save_next_token(prefix, next_token):
-    """Save the next token to DynamoDB."""
-    dynamodb.put_item(
-        TableName=table_name,
-        Item={
-            'prefix': {'S': prefix},
-            'next_token': {'S': next_token}
-        }
-    )
-
-def copy_objects(prefix, start_after, context):
-    """Copy objects in batches using threads."""
-    paginator = s3.get_paginator('list_objects_v2')
-    copied_count = 0
-    last_key = start_after
-
-    while True:
-        # Collect objects to copy
-        page = paginator.paginate(Bucket=source_bucket, Prefix=prefix, StartAfter=start_after).build_full_result()
-        objects_to_copy = [obj['Key'] for obj in page.get('Contents', [])]
-        next_token = page.get('NextContinuationToken', None)
-
-        if not objects_to_copy:
-            break
-
-        # Copy objects using threads
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            futures = {executor.submit(copy_object, obj_key): obj_key for obj_key in objects_to_copy}
+        start_time = time.time()
+        
+        while time.time() - start_time < MAX_WAIT_TIME:
+            try:
+                with self.get_redshift_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(check_sql)
+                        result = cur.fetchone()
+                        
+                        if result:
+                            state = result["state"]
+                            print(f"UNLOAD Status: {state} for {s3_staging_location}")
+                            
+                            if state.lower() == "completed":
+                                print(f"UNLOAD to {s3_staging_location} finished successfully.")
+                                return True
+                            elif state.lower() in ("failed", "error"):
+                                print(f"UNLOAD to {s3_staging_location} failed.")
+                                return False
+                        else:
+                            print(f"No matching UNLOAD operation found for {s3_staging_location}.")
+                            return False
+            except Exception as e:
+                print(f"Error checking UNLOAD status: {e}")
             
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                    copied_count += 1
-                    # Update the last key processed in a thread-safe manner
-                    with lock:
-                        last_key = futures[future]
-                    
-                    # Check remaining Lambda execution time
-                    if get_remaining_time(context) < 60:
-                        # Save the last token and return before timeout
-                        save_next_token(prefix, next_token or last_key)
-                        return copied_count, last_key
-                except Exception as e:
-                    print(f"Error copying object: {e}")
+            time.sleep(CHECK_INTERVAL)
 
-        # Continue to the next page
-        if not next_token:
-            break
-        start_after = last_key
+        print(f"UNLOAD to {s3_staging_location} timed out.")
+        return False
 
-    # If all objects are copied and Lambda has not timed out
-    if objects_to_copy:
-        with lock:
-            last_key = objects_to_copy[-1]
-        save_next_token(prefix, last_key)
+    def initiate_load_from_s3(self, schema_name, table_name, s3_staging_location):
+        """Initiates COPY command asynchronously."""
+        s3_path = f"{s3_staging_location}{schema_name}/{table_name}/"
 
-    return copied_count, last_key
+        copy_sql = f"""
+        COPY {schema_name}.{table_name}
+        FROM '{s3_path}'
+        IAM_ROLE '{self.iam_role}'
+        FORMAT AS PARQUET;
+        """
 
-def copy_object(obj_key):
-    """Copy a single object."""
-    copy_source = {'Bucket': source_bucket, 'Key': obj_key}
-    destination_key = obj_key.replace(prefix, prefix, 1)
-    s3.copy_object(CopySource=copy_source, Bucket=destination_bucket, Key=destination_key)
+        try:
+            with self.get_redshift_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(copy_sql)
+                    print(f"COPY initiated for {schema_name}.{table_name} from {s3_path}")
+        except Exception as e:
+            print(f"Error initiating COPY: {e}")
 
-def get_remaining_time(context):
-    """Get the remaining time before Lambda times out."""
-    return context.get_remaining_time_in_millis() / 1000
+    def check_load_status(self, s3_staging_location):
+        """Checks if the COPY operation for the specific S3 location and IAM role is completed."""
+        check_sql = f"""
+        SELECT pid, query, state, elapsed 
+        FROM STL_QUERY 
+        WHERE querytxt ILIKE 'COPY%' 
+          AND querytxt ILIKE '%{s3_staging_location}%'
+          AND querytxt ILIKE '%{self.iam_role}%'
+        ORDER BY starttime DESC 
+        LIMIT 1;
+        """
+
+        start_time = time.time()
+
+        while time.time() - start_time < MAX_WAIT_TIME:
+            try:
+                with self.get_redshift_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(check_sql)
+                        result = cur.fetchone()
+                        
+                        if result:
+                            state = result["state"]
+                            print(f"COPY Status: {state} for {s3_staging_location}")
+                            
+                            if state.lower() == "completed":
+                                print(f"COPY from {s3_staging_location} finished successfully.")
+                                return True
+                            elif state.lower() in ("failed", "error"):
+                                print(f"COPY from {s3_staging_location} failed.")
+                                return False
+                        else:
+                            print(f"No matching COPY operation found for {s3_staging_location}.")
+                            return False
+            except Exception as e:
+                print(f"Error checking COPY status: {e}")
+
+            time.sleep(CHECK_INTERVAL)
+
+        print(f"COPY from {s3_staging_location} timed out.")
+        return False
