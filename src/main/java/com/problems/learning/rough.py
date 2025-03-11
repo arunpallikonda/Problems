@@ -1,146 +1,110 @@
+import pytest
 import time
-import psycopg
-from psycopg.rows import dict_row
+from unittest.mock import patch, MagicMock
+from moto import mock_s3
+import boto3
 
-CHECK_INTERVAL = 30  # Check every 30 seconds
-MAX_WAIT_TIME = 900  # 15 minutes
+from my_module import RedshiftS3Loader  # Replace with actual import
 
-class RedshiftS3Loader:
-    def __init__(self, host, db, user, password, iam_role):
-        self.host = host
-        self.db = db
-        self.user = user
-        self.password = password
-        self.iam_role = iam_role
+# Mock Redshift credentials and S3 settings
+IAM_ROLE = "arn:aws:iam::123456789012:role/RedshiftS3Role"
+S3_BUCKET = "test-bucket"
+S3_PREFIX = "redshift_exports/"
+SCHEMA = "public"
+TABLE = "test_table"
+S3_STAGING_LOCATION = f"s3://{S3_BUCKET}/{S3_PREFIX}"
 
-    def get_redshift_connection(self):
-        """Returns a psycopg connection object."""
-        return psycopg.connect(
-            host=self.host,
-            dbname=self.db,
-            user=self.user,
-            password=self.password,
-            row_factory=dict_row
-        )
+@pytest.fixture
+def redshift_loader():
+    """Fixture for RedshiftS3Loader instance."""
+    return RedshiftS3Loader("fake-host", "testdb", "testuser", "testpassword", IAM_ROLE)
 
-    def initiate_unload_to_s3(self, schema_name, table_name, s3_staging_location):
-        """Initiates UNLOAD command asynchronously."""
-        s3_path = f"{s3_staging_location}{schema_name}/{table_name}/"
+@mock_s3
+def test_successful_unload(redshift_loader):
+    """Test successful UNLOAD operation."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
+
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
         
-        unload_sql = f"""
-        UNLOAD ('SELECT * FROM {schema_name}.{table_name}')
-        TO '{s3_path}'
-        IAM_ROLE '{self.iam_role}'
-        FORMAT AS PARQUET;
-        """
+        redshift_loader.initiate_unload_to_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
 
-        try:
-            with self.get_redshift_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(unload_sql)
-                    print(f"UNLOAD initiated for {schema_name}.{table_name} to {s3_path}")
-        except Exception as e:
-            print(f"Error initiating UNLOAD: {e}")
+        mock_cursor.fetchone.return_value = {"state": "completed"}
+        assert redshift_loader.check_unload_status(S3_STAGING_LOCATION) is True
 
-    def check_unload_status(self, s3_staging_location):
-        """Checks if the UNLOAD operation for the specific S3 location and IAM role is completed."""
-        check_sql = f"""
-        SELECT pid, query, state, elapsed 
-        FROM STL_QUERY 
-        WHERE querytxt ILIKE 'UNLOAD%' 
-          AND querytxt ILIKE '%{s3_staging_location}%' 
-          AND querytxt ILIKE '%{self.iam_role}%'
-        ORDER BY starttime DESC 
-        LIMIT 1;
-        """
+@mock_s3
+def test_unload_failure(redshift_loader):
+    """Test UNLOAD failure case."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
 
-        start_time = time.time()
-        
-        while time.time() - start_time < MAX_WAIT_TIME:
-            try:
-                with self.get_redshift_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(check_sql)
-                        result = cur.fetchone()
-                        
-                        if result:
-                            state = result["state"]
-                            print(f"UNLOAD Status: {state} for {s3_staging_location}")
-                            
-                            if state.lower() == "completed":
-                                print(f"UNLOAD to {s3_staging_location} finished successfully.")
-                                return True
-                            elif state.lower() in ("failed", "error"):
-                                print(f"UNLOAD to {s3_staging_location} failed.")
-                                return False
-                        else:
-                            print(f"No matching UNLOAD operation found for {s3_staging_location}.")
-                            return False
-            except Exception as e:
-                print(f"Error checking UNLOAD status: {e}")
-            
-            time.sleep(CHECK_INTERVAL)
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
 
-        print(f"UNLOAD to {s3_staging_location} timed out.")
-        return False
+        redshift_loader.initiate_unload_to_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
 
-    def initiate_load_from_s3(self, schema_name, table_name, s3_staging_location):
-        """Initiates COPY command asynchronously."""
-        s3_path = f"{s3_staging_location}{schema_name}/{table_name}/"
+        mock_cursor.fetchone.return_value = {"state": "failed"}
+        assert redshift_loader.check_unload_status(S3_STAGING_LOCATION) is False
 
-        copy_sql = f"""
-        COPY {schema_name}.{table_name}
-        FROM '{s3_path}'
-        IAM_ROLE '{self.iam_role}'
-        FORMAT AS PARQUET;
-        """
+@mock_s3
+def test_unload_timeout(redshift_loader):
+    """Test UNLOAD operation timeout."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
 
-        try:
-            with self.get_redshift_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(copy_sql)
-                    print(f"COPY initiated for {schema_name}.{table_name} from {s3_path}")
-        except Exception as e:
-            print(f"Error initiating COPY: {e}")
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
 
-    def check_load_status(self, s3_staging_location):
-        """Checks if the COPY operation for the specific S3 location and IAM role is completed."""
-        check_sql = f"""
-        SELECT pid, query, state, elapsed 
-        FROM STL_QUERY 
-        WHERE querytxt ILIKE 'COPY%' 
-          AND querytxt ILIKE '%{s3_staging_location}%'
-          AND querytxt ILIKE '%{self.iam_role}%'
-        ORDER BY starttime DESC 
-        LIMIT 1;
-        """
+        redshift_loader.initiate_unload_to_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
 
-        start_time = time.time()
+        mock_cursor.fetchone.side_effect = [{"state": "running"}] * 50
+        assert redshift_loader.check_unload_status(S3_STAGING_LOCATION) is False
 
-        while time.time() - start_time < MAX_WAIT_TIME:
-            try:
-                with self.get_redshift_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(check_sql)
-                        result = cur.fetchone()
-                        
-                        if result:
-                            state = result["state"]
-                            print(f"COPY Status: {state} for {s3_staging_location}")
-                            
-                            if state.lower() == "completed":
-                                print(f"COPY from {s3_staging_location} finished successfully.")
-                                return True
-                            elif state.lower() in ("failed", "error"):
-                                print(f"COPY from {s3_staging_location} failed.")
-                                return False
-                        else:
-                            print(f"No matching COPY operation found for {s3_staging_location}.")
-                            return False
-            except Exception as e:
-                print(f"Error checking COPY status: {e}")
+@mock_s3
+def test_successful_copy(redshift_loader):
+    """Test successful COPY operation."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
 
-            time.sleep(CHECK_INTERVAL)
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
 
-        print(f"COPY from {s3_staging_location} timed out.")
-        return False
+        redshift_loader.initiate_load_from_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
+
+        mock_cursor.fetchone.return_value = {"state": "completed"}
+        assert redshift_loader.check_load_status(S3_STAGING_LOCATION) is True
+
+@mock_s3
+def test_copy_failure(redshift_loader):
+    """Test COPY failure case."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
+
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+
+        redshift_loader.initiate_load_from_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
+
+        mock_cursor.fetchone.return_value = {"state": "failed"}
+        assert redshift_loader.check_load_status(S3_STAGING_LOCATION) is False
+
+@mock_s3
+def test_copy_timeout(redshift_loader):
+    """Test COPY operation timeout."""
+    s3 = boto3.client("s3")
+    s3.create_bucket(Bucket=S3_BUCKET)
+
+    with patch("psycopg.connect") as mock_connect:
+        mock_cursor = MagicMock()
+        mock_connect.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+
+        redshift_loader.initiate_load_from_s3(SCHEMA, TABLE, S3_STAGING_LOCATION)
+
+        mock_cursor.fetchone.side_effect = [{"state": "running"}] * 50
+        assert redshift_loader.check_load_status(S3_STAGING_LOCATION) is False
