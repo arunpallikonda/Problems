@@ -1,28 +1,82 @@
+import boto3
 import gzip
-import random
-import string
-from datetime import datetime, timedelta
+import io
+import json
+from boto3.dynamodb.types import TypeDeserializer
 
-def random_string(length=8):
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+s3 = boto3.client('s3')
+bucket = 'your-bucket'
+gz_key = 'input-dynamo-lines.json.gz'
+output_key = 'output-normal-json.json'
 
-def random_date(start, end):
-    return start + timedelta(seconds=random.randint(0, int((end - start).total_seconds())))
+deserializer = TypeDeserializer()
 
-def generate_random_dict():
-    return {
-        "id": random.randint(1000, 9999),
-        "name": random_string(10),
-        "timestamp": random_date(datetime(2020, 1, 1), datetime(2025, 1, 1)).isoformat(),
-        "active": random.choice([True, False]),
-        "score": round(random.uniform(0, 100), 2)
-    }
+mpu = s3.create_multipart_upload(Bucket=bucket, Key=output_key)
+upload_id = mpu['UploadId']
+parts = []
+part_number = 1
+buffer = io.StringIO()
+part_size = 5 * 1024 * 1024  # 5MB
+current_size = 0
 
-def generate_gz_file(filename, num_records):
-    with gzip.open(filename, 'wt', encoding='utf-8') as f:
-        for _ in range(num_records):
-            record = generate_random_dict()
-            f.write(str(record) + '\n')
+s3_object = s3.get_object(Bucket=bucket, Key=gz_key)
+gz_stream = gzip.GzipFile(fileobj=s3_object['Body'])
 
-if __name__ == "__main__":
-    generate_gz_file("random_dicts.gz", num_records=1000000)  # Change this number to control file size
+def dynamo_to_regular_json(dynamo_json):
+    return {k: deserializer.deserialize(v) for k, v in dynamo_json.items()}
+
+def upload_part(force=False):
+    global part_number, current_size, buffer
+    if current_size >= part_size or force:
+        data = buffer.getvalue()
+        response = s3.upload_part(
+            Body=data.encode('utf-8'),
+            Bucket=bucket,
+            Key=output_key,
+            UploadId=upload_id,
+            PartNumber=part_number
+        )
+        parts.append({'PartNumber': part_number, 'ETag': response['ETag']})
+        part_number += 1
+        buffer = io.StringIO()
+        current_size = 0
+
+# Begin JSON array
+buffer.write("[\n")
+current_size += 2
+first_line = True
+
+try:
+    for raw_line in gz_stream:
+        line = raw_line.decode('utf-8').strip()
+        if not line:
+            continue
+        dynamo_item = json.loads(line)
+        normal_item = dynamo_to_regular_json(dynamo_item)
+        if not first_line:
+            buffer.write(",\n")
+            current_size += 2
+        else:
+            first_line = False
+
+        json_str = json.dumps(normal_item)
+        buffer.write(json_str)
+        current_size += len(json_str.encode('utf-8'))
+
+        upload_part()
+
+    # Close JSON array
+    buffer.write("\n]")
+    current_size += 2
+    upload_part(force=True)
+
+    s3.complete_multipart_upload(
+        Bucket=bucket,
+        Key=output_key,
+        UploadId=upload_id,
+        MultipartUpload={'Parts': parts}
+    )
+except Exception as e:
+    print("Error:", e)
+    s3.abort_multipart_upload(Bucket=bucket, Key=output_key, UploadId=upload_id)
+    raise
