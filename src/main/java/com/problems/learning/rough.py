@@ -1,20 +1,21 @@
 import boto3
 import json
 import io
-
 from boto3.dynamodb.types import TypeSerializer
 
+# AWS setup
 s3 = boto3.client('s3')
 bucket = 'your-bucket'
 input_key = 'output-normal-json.json'
-output_key = 'input-dynamo-lines.json.gz'  # Replace file
-part_size = 5 * 1024 * 1024  # 5 MB
+output_key = 'input-dynamo-lines.json'  # Uncompressed JSON
 
 serializer = TypeSerializer()
 
 def to_dynamo_format(item):
     return {k: serializer.serialize(v) for k, v in item.items()}
 
+# Multipart upload setup
+part_size = 5 * 1024 * 1024  # 5MB
 mpu = s3.create_multipart_upload(Bucket=bucket, Key=output_key)
 upload_id = mpu['UploadId']
 parts = []
@@ -39,40 +40,37 @@ def upload_part(force=False):
         current_size = 0
 
 try:
+    # Stream input file from S3
     obj = s3.get_object(Bucket=bucket, Key=input_key)
     stream = obj['Body']
 
-    # You must parse the file as a JSON array, but stream it safely
     buf = ''
     depth = 0
-    inside = False
+    inside_object = False
 
-    for chunk in stream.iter_lines():
-        if chunk:
-            line = chunk.decode('utf-8')
-            buf += line.strip()
+    for line_bytes in stream.iter_lines():
+        line = line_bytes.decode('utf-8').strip()
+        if not line or line in ('[', ']'):
+            continue  # Skip array brackets or empty lines
 
-            # Primitive token parsing to extract full JSON objects
-            for i, ch in enumerate(line):
-                if ch == '{':
-                    depth += 1
-                    inside = True
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0 and inside:
-                        inside = False
-                        # We found a full JSON object
-                        json_str = buf.strip().rstrip(',').lstrip('[').rstrip(']')
-                        buf = ''
+        buf += line
 
-                        if not json_str:
-                            continue
-                        item = json.loads(json_str)
-                        dynamo_json = json.dumps(to_dynamo_format(item))
-                        buffer.write(dynamo_json + "\n")
-                        current_size += len(dynamo_json.encode('utf-8')) + 1
-
-                        upload_part()
+        # Track brackets to detect full JSON object
+        for char in line:
+            if char == '{':
+                depth += 1
+                inside_object = True
+            elif char == '}':
+                depth -= 1
+                if depth == 0 and inside_object:
+                    inside_object = False
+                    json_str = buf.rstrip(',')  # Remove trailing comma
+                    buf = ''
+                    item = json.loads(json_str)
+                    dynamo_item = json.dumps(to_dynamo_format(item))
+                    buffer.write(dynamo_item + '\n')
+                    current_size += len(dynamo_item.encode('utf-8')) + 1
+                    upload_part()
 
     upload_part(force=True)
 
@@ -82,8 +80,8 @@ try:
         UploadId=upload_id,
         MultipartUpload={'Parts': parts}
     )
-    print("✅ Multipart upload completed.")
+    print("✅ Successfully converted JSON and uploaded to S3.")
 except Exception as e:
-    print("❌ Error during upload:", str(e))
+    print("❌ Error:", str(e))
     s3.abort_multipart_upload(Bucket=bucket, Key=output_key, UploadId=upload_id)
     raise
