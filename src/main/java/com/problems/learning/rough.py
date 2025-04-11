@@ -3,20 +3,18 @@ import json
 import io
 from boto3.dynamodb.types import TypeSerializer
 
-# AWS setup
 s3 = boto3.client('s3')
 bucket = 'your-bucket'
 input_key = 'output-normal-json.json'
-output_key = 'input-dynamo-lines.json'  # Uncompressed JSON
+temp_key = input_key + ".tmp"
 
 serializer = TypeSerializer()
 
 def to_dynamo_format(item):
     return {k: serializer.serialize(v) for k, v in item.items()}
 
-# Multipart upload setup
 part_size = 5 * 1024 * 1024  # 5MB
-mpu = s3.create_multipart_upload(Bucket=bucket, Key=output_key)
+mpu = s3.create_multipart_upload(Bucket=bucket, Key=temp_key)
 upload_id = mpu['UploadId']
 parts = []
 part_number = 1
@@ -30,7 +28,7 @@ def upload_part(force=False):
         response = s3.upload_part(
             Body=data,
             Bucket=bucket,
-            Key=output_key,
+            Key=temp_key,
             UploadId=upload_id,
             PartNumber=part_number
         )
@@ -40,7 +38,6 @@ def upload_part(force=False):
         current_size = 0
 
 try:
-    # Stream input file from S3
     obj = s3.get_object(Bucket=bucket, Key=input_key)
     stream = obj['Body']
 
@@ -55,7 +52,6 @@ try:
 
         buf += line
 
-        # Track brackets to detect full JSON object
         for char in line:
             if char == '{':
                 depth += 1
@@ -64,7 +60,7 @@ try:
                 depth -= 1
                 if depth == 0 and inside_object:
                     inside_object = False
-                    json_str = buf.rstrip(',')  # Remove trailing comma
+                    json_str = buf.rstrip(',')
                     buf = ''
                     item = json.loads(json_str)
                     dynamo_item = json.dumps(to_dynamo_format(item))
@@ -76,12 +72,18 @@ try:
 
     s3.complete_multipart_upload(
         Bucket=bucket,
-        Key=output_key,
+        Key=temp_key,
         UploadId=upload_id,
         MultipartUpload={'Parts': parts}
     )
-    print("✅ Successfully converted JSON and uploaded to S3.")
+
+    # Overwrite original object with temp file
+    s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': temp_key}, Key=input_key)
+    s3.delete_object(Bucket=bucket, Key=temp_key)
+
+    print("✅ Successfully transformed and overwrote the original S3 file.")
+
 except Exception as e:
     print("❌ Error:", str(e))
-    s3.abort_multipart_upload(Bucket=bucket, Key=output_key, UploadId=upload_id)
+    s3.abort_multipart_upload(Bucket=bucket, Key=temp_key, UploadId=upload_id)
     raise
