@@ -399,4 +399,45 @@ public class FileToKafkaService {
         return message;
     }
 }
+
+
+import org.w3c.dom.*;
+import javax.xml.parsers.*;
+import javax.xml.transform.*;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.*;
+
+public class FixmlUpdater {
+
+    public static String updateBizDt(String xml, String newDate) throws Exception {
+        DocumentBuilderFactory dbFactory = DocumentBuilderFactory.newInstance();
+        dbFactory.setNamespaceAware(false);
+        DocumentBuilder dBuilder = dbFactory.newDocumentBuilder();
+        Document doc = dBuilder.parse(new ByteArrayInputStream(xml.getBytes()));
+
+        // Update all elements with attribute BizDt
+        NodeList allElements = doc.getElementsByTagName("*");
+        for (int i = 0; i < allElements.getLength(); i++) {
+            Element element = (Element) allElements.item(i);
+            if (element.hasAttribute("BizDt")) {
+                element.setAttribute("BizDt", newDate);
+            }
+        }
+
+        // Convert DOM back to string
+        Transformer transformer = TransformerFactory.newInstance().newTransformer();
+        transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
+        StringWriter writer = new StringWriter();
+        transformer.transform(new DOMSource(doc), new StreamResult(writer));
+
+        return writer.toString();
+    }
+
+    public static void main(String[] args) throws Exception {
+        String originalFixml = "<MktDataFull RptID=\"91809178\" BizDt=\"2025-04-22\" ... ></MktDataFull>";
+        String updatedFixml = updateBizDt(originalFixml, "2025-04-26");
+        System.out.println(updatedFixml);
+    }
+}
         
