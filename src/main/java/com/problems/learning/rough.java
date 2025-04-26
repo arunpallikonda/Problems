@@ -435,7 +435,7 @@ public class FixmlUpdater {
     }
 
     public static void main(String[] args) throws Exception {
-        String originalFixml = "<MktDataFull RptID=\"91809178\" BizDt=\"2025-04-22\" ... ></MktDataFull>";
+        String originalFixml = "";
         String updatedFixml = updateBizDt(originalFixml, "2025-04-26");
         System.out.println(updatedFixml);
     }
