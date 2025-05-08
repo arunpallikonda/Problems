@@ -1,89 +1,60 @@
 import boto3
-import json
-import io
-from boto3.dynamodb.types import TypeSerializer
 
-s3 = boto3.client('s3')
-bucket = 'your-bucket'
-input_key = 'output-normal-json.json'
-temp_key = input_key + ".tmp"
+rds = boto3.client('rds')
+redshift = boto3.client('redshift')
 
-serializer = TypeSerializer()
+def get_snapshot_count(service: str, snapshot_type='manual') -> int:
+    count = 0
+    if service == 'rds':
+        paginator = rds.get_paginator('describe_db_snapshots')
+        for page in paginator.paginate(SnapshotType=snapshot_type):
+            count += len(page['DBSnapshots'])
+    elif service == 'redshift':
+        paginator = redshift.get_paginator('describe_cluster_snapshots')
+        for page in paginator.paginate(SnapshotType=snapshot_type):
+            count += len(page['Snapshots'])
+    return count
 
-def to_dynamo_format(item):
-    return {k: serializer.serialize(v) for k, v in item.items()}
+def get_storage_size(service: str, identifier: str) -> int:
+    if service == 'rds':
+        response = rds.describe_db_instances(DBInstanceIdentifier=identifier)
+        return response['DBInstances'][0]['AllocatedStorage']
+    elif service == 'redshift':
+        response = redshift.describe_clusters(ClusterIdentifier=identifier)
+        cluster = response['Clusters'][0]
+        node_type = cluster['NodeType']
+        node_count = cluster['NumberOfNodes']
+        storage_per_node = {
+            'dc2.large': 160,
+            'dc2.8xlarge': 2560,
+            'ra3.xlplus': 32000,
+            'ra3.4xlarge': 64000,
+        }
+        return node_count * storage_per_node.get(node_type, 0)
+    return 0
 
-part_size = 5 * 1024 * 1024  # 5MB
-mpu = s3.create_multipart_upload(Bucket=bucket, Key=temp_key)
-upload_id = mpu['UploadId']
-parts = []
-part_number = 1
-buffer = io.StringIO()
-current_size = 0
+def validate_preconditions(rds_id=None, redshift_id=None, snapshot_buffer=2, snapshot_limit_rds=100, snapshot_limit_redshift=100):
+    status = {}
 
-def upload_part(force=False):
-    global part_number, current_size, buffer
-    if current_size >= part_size or force:
-        data = buffer.getvalue().encode('utf-8')
-        response = s3.upload_part(
-            Body=data,
-            Bucket=bucket,
-            Key=temp_key,
-            UploadId=upload_id,
-            PartNumber=part_number
-        )
-        parts.append({'PartNumber': part_number, 'ETag': response['ETag']})
-        part_number += 1
-        buffer = io.StringIO()
-        current_size = 0
+    if rds_id:
+        rds_snap_count = get_snapshot_count('rds')
+        rds_storage = get_storage_size('rds', rds_id)
+        status['rds'] = {
+            'snapshot_count': rds_snap_count,
+            'within_snapshot_limit': rds_snap_count + snapshot_buffer <= snapshot_limit_rds,
+            'source_storage_gb': rds_storage
+        }
 
-try:
-    obj = s3.get_object(Bucket=bucket, Key=input_key)
-    stream = obj['Body']
+    if redshift_id:
+        redshift_snap_count = get_snapshot_count('redshift')
+        redshift_storage = get_storage_size('redshift', redshift_id)
+        status['redshift'] = {
+            'snapshot_count': redshift_snap_count,
+            'within_snapshot_limit': redshift_snap_count + snapshot_buffer <= snapshot_limit_redshift,
+            'source_storage_gb': redshift_storage
+        }
 
-    buf = ''
-    depth = 0
-    inside_object = False
+    return status
 
-    for line_bytes in stream.iter_lines():
-        line = line_bytes.decode('utf-8').strip()
-        if not line or line in ('[', ']'):
-            continue  # Skip array brackets or empty lines
-
-        buf += line
-
-        for char in line:
-            if char == '{':
-                depth += 1
-                inside_object = True
-            elif char == '}':
-                depth -= 1
-                if depth == 0 and inside_object:
-                    inside_object = False
-                    json_str = buf.rstrip(',')
-                    buf = ''
-                    item = json.loads(json_str)
-                    dynamo_item = json.dumps(to_dynamo_format(item))
-                    buffer.write(dynamo_item + '\n')
-                    current_size += len(dynamo_item.encode('utf-8')) + 1
-                    upload_part()
-
-    upload_part(force=True)
-
-    s3.complete_multipart_upload(
-        Bucket=bucket,
-        Key=temp_key,
-        UploadId=upload_id,
-        MultipartUpload={'Parts': parts}
-    )
-
-    # Overwrite original object with temp file
-    s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': temp_key}, Key=input_key)
-    s3.delete_object(Bucket=bucket, Key=temp_key)
-
-    print("✅ Successfully transformed and overwrote the original S3 file.")
-
-except Exception as e:
-    print("❌ Error:", str(e))
-    s3.abort_multipart_upload(Bucket=bucket, Key=temp_key, UploadId=upload_id)
-    raise
+# Example usage:
+# print(validate_preconditions(rds_id='your-rds-instance-id', redshift_id='your-redshift-cluster-id'))
