@@ -24,8 +24,11 @@ def get_redshift_account_limits():
             limits['MaxClusters'] = int(attr['AttributeValues'][0]['AttributeValue'])
 
     # Count current clusters
-    clusters = redshift.describe_clusters()
-    limits['CurrentClusters'] = len(clusters['Clusters'])
+    paginator = redshift.get_paginator('describe_clusters')
+    cluster_count = 0
+    for page in paginator.paginate():
+        cluster_count += len(page['Clusters'])
+    limits['CurrentClusters'] = cluster_count
 
     # Count manual snapshots
     paginator = redshift.get_paginator('describe_cluster_snapshots')
