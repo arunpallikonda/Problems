@@ -2,112 +2,112 @@ import boto3
 
 def get_rds_account_limits():
     rds = boto3.client('rds')
-    quotas = rds.describe_account_attributes()
-    limits = {}
-    for item in quotas['AccountQuotas']:
-        limits[item['AccountQuotaName']] = {
-            'max': item['Max'],
-            'used': item['Used']
-        }
-    return limits
+    response = rds.describe_account_attributes()
+    quota_map = {q['AccountQuotaName']: q for q in response['AccountQuotas']}
+    return {
+        'DBInstances': quota_map.get('DBInstances', {}),
+        'DBClusters': quota_map.get('DBClusters', {}),
+        'ManualSnapshots': quota_map.get('ManualSnapshots', {}),
+        'ManualClusterSnapshots': quota_map.get('ManualClusterSnapshots', {}),
+        'AllocatedStorage': quota_map.get('AllocatedStorage', {}),
+    }
 
 def get_redshift_account_limits():
     redshift = boto3.client('redshift')
     response = redshift.describe_account_attributes()
     limits = {}
     for attr in response['AccountAttributes']:
-        limits[attr['AttributeName']] = int(attr['AttributeValues'][0]['AttributeValue'])
+        if attr['AttributeName'] == 'max-clusters':
+            limits['MaxClusters'] = int(attr['AttributeValues'][0]['AttributeValue'])
     return limits
 
-def count_rds_snapshots():
-    rds = boto3.client('rds')
-    paginator = rds.get_paginator('describe_db_snapshots')
-    instance_snapshots = sum(len(p['DBSnapshots']) for p in paginator.paginate(SnapshotType='manual'))
-
-    paginator = rds.get_paginator('describe_db_cluster_snapshots')
-    cluster_snapshots = sum(len(p['DBClusterSnapshots']) for p in paginator.paginate(SnapshotType='manual'))
-
-    return instance_snapshots, cluster_snapshots
-
-def get_rds_allocated_storage():
-    rds = boto3.client('rds')
-    paginator = rds.get_paginator('describe_db_instances')
-    return sum(instance['AllocatedStorage'] for page in paginator.paginate() for instance in page['DBInstances'])
-
-def count_redshift_snapshots():
+def count_redshift_manual_snapshots():
     redshift = boto3.client('redshift')
     paginator = redshift.get_paginator('describe_cluster_snapshots')
-    return sum(len(p['Snapshots']) for p in paginator.paginate(SnapshotType='manual'))
+    page_iterator = paginator.paginate(SnapshotType='manual')
 
-def get_redshift_cluster_usage():
+    count = 0
+    for page in page_iterator:
+        count += len(page['Snapshots'])
+    return count
+
+def get_current_redshift_cluster_count():
     redshift = boto3.client('redshift')
     response = redshift.describe_clusters()
-    clusters = response['Clusters']
-    node_storage = {
-        'dc2.large': 160,
-        'dc2.8xlarge': 2560,
-        'ra3.xlplus': 32000,
-        'ra3.4xlarge': 64000
-    }
-    total_storage = 0
-    for cluster in clusters:
-        node_type = cluster['NodeType']
-        count = cluster['NumberOfNodes']
-        total_storage += count * node_storage.get(node_type, 0)
-    return len(clusters), total_storage
+    return len(response['Clusters'])
 
-def summarize_limits(snapshot_buffer=2):
+def check_limit(used, requested, max_allowed):
+    return {
+        'current_count': used,
+        'max_allowed': max_allowed,
+        'is_in_limit': (used + requested) <= max_allowed
+    }
+
+def validate_capacity(requested_rds, requested_redshift, redshift_snapshot_limit=100):
     rds_limits = get_rds_account_limits()
     redshift_limits = get_redshift_account_limits()
+    redshift_snapshot_count = count_redshift_manual_snapshots()
+    redshift_cluster_count = get_current_redshift_cluster_count()
 
-    rds_inst_snaps, rds_cluster_snaps = count_rds_snapshots()
-    rds_storage = get_rds_allocated_storage()
+    result = {}
 
-    redshift_snaps = count_redshift_snapshots()
-    redshift_clusters, redshift_storage = get_redshift_cluster_usage()
+    result['RDS_DBInstances'] = check_limit(
+        rds_limits['DBInstances'].get('Used', 0),
+        requested_rds['DBInstances'],
+        rds_limits['DBInstances'].get('Max', 0)
+    )
 
-    return {
-        'RDS Instance Snapshots': {
-            'Used': rds_inst_snaps,
-            'Max': rds_limits.get('ManualSnapshots', {}).get('max'),
-            'WithinLimit': rds_inst_snaps + snapshot_buffer <= rds_limits.get('ManualSnapshots', {}).get('max', float('inf'))
-        },
-        'RDS Cluster Snapshots': {
-            'Used': rds_cluster_snaps,
-            'Max': rds_limits.get('ManualClusterSnapshots', {}).get('max'),
-            'WithinLimit': rds_cluster_snaps + snapshot_buffer <= rds_limits.get('ManualClusterSnapshots', {}).get('max', float('inf'))
-        },
-        'RDS Storage (GB)': {
-            'Used': rds_storage,
-            'Max': rds_limits.get('AllocatedStorage', {}).get('max'),
-            'WithinLimit': rds_storage <= rds_limits.get('AllocatedStorage', {}).get('max', float('inf'))
-        },
-        'RDS Instances': {
-            'Used': rds_limits.get('DBInstances', {}).get('used'),
-            'Max': rds_limits.get('DBInstances', {}).get('max')
-        },
-        'RDS Clusters': {
-            'Used': rds_limits.get('DBClusters', {}).get('used'),
-            'Max': rds_limits.get('DBClusters', {}).get('max')
-        },
-        'Redshift Snapshots': {
-            'Used': redshift_snaps,
-            'Max': redshift_limits.get('max-number-of-snapshots'),
-            'WithinLimit': redshift_snaps + snapshot_buffer <= redshift_limits.get('max-number-of-snapshots', float('inf'))
-        },
-        'Redshift Clusters': {
-            'Used': redshift_clusters,
-            'Max': redshift_limits.get('max-clusters'),
-            'WithinLimit': redshift_clusters < redshift_limits.get('max-clusters', float('inf'))
-        },
-        'Redshift Estimated Storage (GB)': {
-            'Used': redshift_storage,
-            'Note': 'Based on node type estimate'
-        }
-    }
+    result['RDS_DBClusters'] = check_limit(
+        rds_limits['DBClusters'].get('Used', 0),
+        requested_rds['DBClusters'],
+        rds_limits['DBClusters'].get('Max', 0)
+    )
 
-# Example usage:
-if _name_ == '_main_':
-    import json
-    result = summarize_limits()
-    print(json.dumps(result, indent=2))
+    result['RDS_ManualSnapshots'] = check_limit(
+        rds_limits['ManualSnapshots'].get('Used', 0),
+        requested_rds['ManualSnapshots'],
+        rds_limits['ManualSnapshots'].get('Max', 0)
+    )
+
+    result['RDS_ManualClusterSnapshots'] = check_limit(
+        rds_limits['ManualClusterSnapshots'].get('Used', 0),
+        requested_rds['ManualClusterSnapshots'],
+        rds_limits['ManualClusterSnapshots'].get('Max', 0)
+    )
+
+    result['RDS_AllocatedStorage'] = check_limit(
+        rds_limits['AllocatedStorage'].get('Used', 0),
+        requested_rds['AllocatedStorage'],
+        rds_limits['AllocatedStorage'].get('Max', 0)
+    )
+
+    result['Redshift_Clusters'] = check_limit(
+        redshift_cluster_count,
+        requested_redshift['Clusters'],
+        redshift_limits.get('MaxClusters', 0)
+    )
+
+    result['Redshift_ManualSnapshots'] = check_limit(
+        redshift_snapshot_count,
+        requested_redshift['Snapshots'],
+        redshift_snapshot_limit
+    )
+
+    return result
+
+# Example usage
+requested_rds = {
+    'DBInstances': 2,
+    'DBClusters': 1,
+    'ManualSnapshots': 3,
+    'ManualClusterSnapshots': 1,
+    'AllocatedStorage': 500  # in GB
+}
+
+requested_redshift = {
+    'Clusters': 2,
+    'Snapshots': 5
+}
+
+# Run locally
+# print(validate_capacity(requested_rds, requested_redshift))
