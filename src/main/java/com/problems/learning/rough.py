@@ -1,108 +1,84 @@
+import json
 import boto3
+import requests
+import os
+import traceback
 
-def get_rds_account_limits():
-    rds = boto3.client('rds')
-    response = rds.describe_account_attributes()
-    quota_map = {q['AccountQuotaName']: q for q in response['AccountQuotas']}
-    return {
-        'DBInstances': quota_map.get('DBInstances', {}),
-        'DBClusters': quota_map.get('DBClusters', {}),
-        'ManualSnapshots': quota_map.get('ManualSnapshots', {}),
-        'ManualClusterSnapshots': quota_map.get('ManualClusterSnapshots', {}),
-        'AllocatedStorage': quota_map.get('AllocatedStorage', {}),
-    }
+MWAA_ENV_NAME = os.environ.get("MWAA_ENV_NAME")  # Lambda environment variable
+DAG_TO_TRIGGER = os.environ.get("DAG_ID")        # Lambda environment variable
 
-def get_redshift_account_limits():
-    redshift = boto3.client('redshift')
-    
-    limits = {}
+def lambda_handler(event, context):
+    print("🔧 Starting MWAA DAG trigger Lambda execution")
+    print(f"📌 MWAA_ENV_NAME: {MWAA_ENV_NAME}")
+    print(f"📌 DAG_TO_TRIGGER: {DAG_TO_TRIGGER}")
+    print(f"📌 Event received: {json.dumps(event)}")
 
-    # Get max-clusters from account attributes
-    response = redshift.describe_account_attributes()
-    for attr in response['AccountAttributes']:
-        if attr['AttributeName'] == 'max-clusters':
-            limits['MaxClusters'] = int(attr['AttributeValues'][0]['AttributeValue'])
+    try:
+        # Step 1: Get CLI token and hostname
+        print("🔑 Fetching CLI token and hostname from MWAA")
+        mwaa = boto3.client("mwaa")
+        token_response = mwaa.create_cli_token(Name=MWAA_ENV_NAME)
+        token = token_response["CliToken"]
+        hostname = token_response["WebServerHostname"]
+        base_url = f"https://{hostname}"
+        print(f"✅ CLI token received. Hostname: {hostname}")
 
-    # Count current clusters
-    paginator = redshift.get_paginator('describe_clusters')
-    cluster_count = 0
-    for page in paginator.paginate():
-        cluster_count += len(page['Clusters'])
-    limits['CurrentClusters'] = cluster_count
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
 
-    # Count manual snapshots
-    paginator = redshift.get_paginator('describe_cluster_snapshots')
-    snapshot_count = 0
-    for page in paginator.paginate(SnapshotType='manual'):
-        snapshot_count += len(page['Snapshots'])
-    limits['ManualSnapshots'] = snapshot_count
+        # Step 2: List all available DAGs
+        dags_url = f"{base_url}/api/v1/dags"
+        print(f"📥 Listing DAGs from: {dags_url}")
+        dags_response = requests.get(dags_url, headers=headers, verify=True)
+        print(f"📥 DAG list response status: {dags_response.status_code}")
+        print(f"📥 DAG list response body: {dags_response.text}")
+        dags_response.raise_for_status()
+        dags = dags_response.json().get("dags", [])
 
-    return limits
+        print("📋 Available DAGs:")
+        for dag in dags:
+            print(f"   - {dag['dag_id']}")
 
-def check_limit(current, requested, max_allowed):
-    return {
-        'current_count': current,
-        'max_allowed': max_allowed,
-        'is_in_limit': (current + requested) <= max_allowed
-    }
+        # Step 3: Validate DAG exists
+        if not any(d["dag_id"] == DAG_TO_TRIGGER for d in dags):
+            error_msg = f"❌ DAG '{DAG_TO_TRIGGER}' not found in environment '{MWAA_ENV_NAME}'"
+            print(error_msg)
+            return {
+                "statusCode": 404,
+                "body": error_msg
+            }
 
-def validate_capacity(requested_rds, requested_redshift, redshift_snapshot_limit=100):
-    rds_limits = get_rds_account_limits()
-    redshift_limits = get_redshift_account_limits()
+        # Step 4: Trigger the specified DAG
+        dag_trigger_url = f"{base_url}/api/v1/dags/{DAG_TO_TRIGGER}/dagRuns"
+        dag_run_id = f"manual__{context.aws_request_id}"
+        payload = {
+            "dag_run_id": dag_run_id,
+            "conf": {}  # Add conf if needed
+        }
 
-    result = {
-        'RDS_DBInstances': check_limit(
-            rds_limits['DBInstances'].get('Used', 0),
-            requested_rds['DBInstances'],
-            rds_limits['DBInstances'].get('Max', 0)
-        ),
-        'RDS_DBClusters': check_limit(
-            rds_limits['DBClusters'].get('Used', 0),
-            requested_rds['DBClusters'],
-            rds_limits['DBClusters'].get('Max', 0)
-        ),
-        'RDS_ManualSnapshots': check_limit(
-            rds_limits['ManualSnapshots'].get('Used', 0),
-            requested_rds['ManualSnapshots'],
-            rds_limits['ManualSnapshots'].get('Max', 0)
-        ),
-        'RDS_ManualClusterSnapshots': check_limit(
-            rds_limits['ManualClusterSnapshots'].get('Used', 0),
-            requested_rds['ManualClusterSnapshots'],
-            rds_limits['ManualClusterSnapshots'].get('Max', 0)
-        ),
-        'RDS_AllocatedStorage': check_limit(
-            rds_limits['AllocatedStorage'].get('Used', 0),
-            requested_rds['AllocatedStorage'],
-            rds_limits['AllocatedStorage'].get('Max', 0)
-        ),
-        'Redshift_Clusters': check_limit(
-            redshift_limits.get('CurrentClusters', 0),
-            requested_redshift['Clusters'],
-            redshift_limits.get('MaxClusters', 0)
-        ),
-        'Redshift_ManualSnapshots': check_limit(
-            redshift_limits.get('ManualSnapshots', 0),
-            requested_redshift['Snapshots'],
-            redshift_snapshot_limit
-        )
-    }
+        print(f"🚀 Triggering DAG via: {dag_trigger_url}")
+        print(f"🚀 Payload: {json.dumps(payload)}")
 
-    return result
+        trigger_response = requests.post(dag_trigger_url, headers=headers, json=payload, verify=True)
+        print(f"🚀 Trigger response status: {trigger_response.status_code}")
+        print(f"🚀 Trigger response body: {trigger_response.text}")
+        trigger_response.raise_for_status()
 
-# Example inputs
-requested_rds = {
-    'DBInstances': 2,
-    'DBClusters': 1,
-    'ManualSnapshots': 3,
-    'ManualClusterSnapshots': 1,
-    'AllocatedStorage': 500
-}
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": f"DAG '{DAG_TO_TRIGGER}' triggered successfully.",
+                "dag_run_id": dag_run_id,
+                "trigger_response": trigger_response.json()
+            })
+        }
 
-requested_redshift = {
-    'Clusters': 2,
-    'Snapshots': 5
-}
-
-# Run locally:
-# print(validate_capacity(requested_rds, requested_redshift))
+    except Exception as e:
+        print("❗ An exception occurred:")
+        traceback.print_exc()
+        return {
+            "statusCode": 500,
+            "body": f"Internal error: {str(e)}"
+        }
