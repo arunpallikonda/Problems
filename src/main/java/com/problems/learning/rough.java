@@ -123,99 +123,138 @@ import java.util.concurrent.BlockingQueue;
 public interface CompareService<T extends Message> {
     Logger LOGGER = LoggerFactory.getLogger(CompareService.class);
 
+    // Abstract method to be implemented by each proto-specific service
     String getPrimaryKey(T obj);
 
-    default int getDecimalPrecision(String fieldPath) {
-        return 5;
-    }
-
+    // Fields to exclude from comparison
     default Set<String> fieldsToIgnore() {
         return Set.of();
     }
 
-    default Runnable createStreamCompareTask(
+    // Custom decimal precision per field
+    default int getDecimalPrecision(String fieldPath) {
+        return 5;
+    }
+
+    // Custom logic for specific fields
+    default BiPredicate<Object, Object> customComparisonLogic(String fieldPath) {
+        return null;
+    }
+
+    // Core method for batch processing with idle timeout
+    default Runnable createBatchCompareTask(
             BlockingQueue<T> source1Queue,
             BlockingQueue<T> source2Queue,
             ReportService reportService,
-            String schemaName
+            String schemaName,
+            Duration idleTimeout
     ) {
         return () -> {
-            try {
-                Map<String, T> cache1 = new HashMap<>();
-                Map<String, T> cache2 = new HashMap<>();
+            Map<String, T> source1Map = new HashMap<>();
+            Map<String, T> source2Map = new HashMap<>();
+            Instant lastUpdate = Instant.now();
 
-                while (!Thread.currentThread().isInterrupted()) {
-                    T obj1 = source1Queue.poll();
-                    T obj2 = source2Queue.poll();
+            while (true) {
+                boolean dataReceived = false;
+                T s1 = source1Queue.poll();
+                T s2 = source2Queue.poll();
 
-                    if (obj1 != null) {
-                        String pk = getPrimaryKey(obj1);
-                        cache1.put(pk, obj1);
-                        if (cache2.containsKey(pk)) {
-                            compare(cache1.remove(pk), cache2.remove(pk), reportService, schemaName);
-                        }
-                    }
+                if (s1 != null) {
+                    source1Map.put(getPrimaryKey(s1), s1);
+                    lastUpdate = Instant.now();
+                    dataReceived = true;
+                    LOGGER.debug("Received from source1: {}", getPrimaryKey(s1));
+                }
+                if (s2 != null) {
+                    source2Map.put(getPrimaryKey(s2), s2);
+                    lastUpdate = Instant.now();
+                    dataReceived = true;
+                    LOGGER.debug("Received from source2: {}", getPrimaryKey(s2));
+                }
 
-                    if (obj2 != null) {
-                        String pk = getPrimaryKey(obj2);
-                        cache2.put(pk, obj2);
-                        if (cache1.containsKey(pk)) {
-                            compare(cache1.remove(pk), cache2.remove(pk), reportService, schemaName);
+                // Compare when both sides contain a key
+                Iterator<String> iter = source1Map.keySet().iterator();
+                while (iter.hasNext()) {
+                    String key = iter.next();
+                    if (source2Map.containsKey(key)) {
+                        T obj1 = source1Map.get(key);
+                        T obj2 = source2Map.remove(key);
+                        iter.remove();
+                        List<Difference> diffs = compare(obj1, obj2);
+                        for (Difference d : diffs) {
+                            reportService.submitDifference(schemaName, d);
                         }
                     }
                 }
 
-                for (Map.Entry<String, T> entry : cache1.entrySet()) {
-                    reportService.submitDifference(schemaName, new Difference(
-                            entry.getKey(), "ALL_FIELDS", entry.getValue(), null, DifferenceType.MISSING_ROW
-                    ));
+                if (!dataReceived && Duration.between(lastUpdate, Instant.now()).compareTo(idleTimeout) > 0) {
+                    LOGGER.info("Idle timeout reached. Writing unmatched rows.");
+                    for (T unmatched : source1Map.values()) {
+                        reportService.submitDifference(schemaName,
+                                new Difference(getPrimaryKey(unmatched), "-", toJson(unmatched), "", DifferenceType.MISSING_ROW));
+                    }
+                    return;
                 }
 
-            } catch (Exception e) {
-                LOGGER.error("Error in comparison stream task", e);
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ignored) {
+                    return;
+                }
             }
         };
     }
 
-    default void compare(T a, T b, ReportService reportService, String schemaName) {
-        String primaryKey = getPrimaryKey(a);
-        Map<String, Object> fieldsA = extractFields(a, "");
-        Map<String, Object> fieldsB = extractFields(b, "");
-
-        for (String field : fieldsA.keySet()) {
-            if (fieldsToIgnore().contains(field)) continue;
-
-            Object val1 = fieldsA.get(field);
-            Object val2 = fieldsB.get(field);
-
-            if (!Objects.equals(format(val1, field), format(val2, field))) {
-                reportService.submitDifference(schemaName, new Difference(
-                        primaryKey, field, val1, val2, DifferenceType.VALUE_MISMATCH
-                ));
-            }
-        }
+    default List<Difference> compare(T source1, T source2) {
+        List<Difference> result = new ArrayList<>();
+        flattenAndCompare("", source1, source2, result);
+        return result;
     }
 
-    default Map<String, Object> extractFields(Message msg, String path) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        for (Descriptors.FieldDescriptor fd : msg.getDescriptorForType().getFields()) {
-            Object value = msg.getField(fd);
-            String fullPath = path.isEmpty() ? fd.getName() : path + "." + fd.getName();
+    private void flattenAndCompare(String prefix, Message m1, Message m2, List<Difference> result) {
+        for (Descriptors.FieldDescriptor field : m1.getDescriptorForType().getFields()) {
+            String path = prefix.isEmpty() ? field.getName() : prefix + "." + field.getName();
+            if (fieldsToIgnore().contains(path)) continue;
 
-            if (fd.getJavaType() == Descriptors.FieldDescriptor.JavaType.MESSAGE && value instanceof Message) {
-                map.putAll(extractFields((Message) value, fullPath));
+            Object v1 = m1.hasField(field) ? m1.getField(field) : null;
+            Object v2 = m2.hasField(field) ? m2.getField(field) : null;
+
+            if (field.getJavaType() == Descriptors.FieldDescriptor.JavaType.MESSAGE
+                    && v1 instanceof Message && v2 instanceof Message) {
+                flattenAndCompare(path, (Message) v1, (Message) v2, result);
             } else {
-                map.put(fullPath, value);
+                BiPredicate<Object, Object> custom = customComparisonLogic(path);
+                boolean match;
+                if (custom != null) {
+                    match = custom.test(v1, v2);
+                } else if (v1 instanceof Double || v1 instanceof Float) {
+                    match = Objects.equals(roundDouble(v1, getDecimalPrecision(path)),
+                            roundDouble(v2, getDecimalPrecision(path)));
+                } else {
+                    match = Objects.equals(v1, v2);
+                }
+
+                if (!match) {
+                    result.add(new Difference(getPrimaryKey((T) m1), path, v1, v2, DifferenceType.VALUE_MISMATCH));
+                }
             }
         }
-        return map;
     }
 
-    default Object format(Object value, String fieldPath) {
-        if (value instanceof com.google.protobuf.DoubleValue dv) {
-            return String.format("%1$." + getDecimalPrecision(fieldPath) + "f", dv.getValue());
+    private Object roundDouble(Object val, int precision) {
+        if (val instanceof Double d)
+            return Math.round(d * Math.pow(10, precision)) / Math.pow(10, precision);
+        if (val instanceof Float f)
+            return Math.round(f * Math.pow(10, precision)) / Math.pow(10, precision);
+        return val;
+    }
+
+    private String toJson(Message m) {
+        try {
+            return JsonFormat.printer().print(m);
+        } catch (Exception e) {
+            return m.toString();
         }
-        return value;
     }
 }
 
@@ -295,5 +334,192 @@ public class PriceDataExample {
 
         Thread.sleep(5000);
         executor.shutdownNow();
+    }
+}
+
+
+
+
+
+
+
+// === File: DifferenceType.java ===
+package com.example.compare;
+
+public enum DifferenceType {
+    VALUE_MISMATCH,
+    MISSING_ROW
+}
+
+// === File: Difference.java ===
+package com.example.compare;
+
+public record Difference(
+    String primaryKey,
+    String fieldPath,
+    Object value1,
+    Object value2,
+    DifferenceType type
+) {}
+
+// === File: ReportService.java ===
+package com.example.compare;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class ReportService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ReportService.class);
+    private final Map<String, BlockingQueue<Difference>> queues = new ConcurrentHashMap<>();
+    private final Map<String, BufferedWriter> writers = new ConcurrentHashMap<>();
+    private final ExecutorService writerExecutor = Executors.newCachedThreadPool();
+    private final String outputDir;
+
+    public ReportService(String outputDir) {
+        this.outputDir = outputDir;
+        try {
+            Files.createDirectories(Paths.get(outputDir));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create output dir", e);
+        }
+    }
+
+    public void submitDifference(String schema, Difference diff) {
+        queues.computeIfAbsent(schema, this::startWriter).add(diff);
+    }
+
+    private BlockingQueue<Difference> startWriter(String schema) {
+        BlockingQueue<Difference> q = new LinkedBlockingQueue<>();
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter(outputDir + "/" + schema + "_diff.csv"));
+            writer.write("primaryKey,fieldPath,value1,value2,differenceType\n");
+            writers.put(schema, writer);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        writerExecutor.submit(() -> {
+            try {
+                while (true) {
+                    Difference d = q.poll(60, TimeUnit.SECONDS);
+                    if (d == null) break;
+                    writers.get(schema).write(String.format("%s,%s,%s,%s,%s\n",
+                        d.primaryKey(), d.fieldPath(), d.value1(), d.value2(), d.type()));
+                    writers.get(schema).flush();
+                }
+                writers.get(schema).close();
+            } catch (Exception ex) {
+                LOGGER.error("Error writing report for {}", schema, ex);
+            }
+        });
+        return q;
+    }
+}
+
+// === File: PriceDataCompareService.java ===
+package com.example.compare;
+
+import com.example.proto.PriceData;
+import com.google.protobuf.Message;
+
+import java.util.Set;
+
+public class PriceDataCompareService implements CompareService<PriceData> {
+    @Override
+    public String getPrimaryKey(PriceData obj) {
+        return obj.getId();
+    }
+
+    @Override
+    public Set<String> fieldsToIgnore() {
+        return Set.of("timestamp", "details.notes");
+    }
+
+    @Override
+    public int getDecimalPrecision(String fieldPath) {
+        return switch (fieldPath) {
+            case "price" -> 4;
+            default -> 5;
+        };
+    }
+}
+
+// === File: ProtoBatchCompareApplication.java ===
+package com.example.compare;
+
+import com.example.proto.PriceData;
+import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Timestamps;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.*;
+
+public class ProtoBatchCompareApplication {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProtoBatchCompareApplication.class);
+
+    public static void main(String[] args) throws InterruptedException, ExecutionException {
+        String outputDir = "./output";
+        String schemaName = "PriceData";
+
+        BlockingQueue<PriceData> source1Queue = new LinkedBlockingQueue<>();
+        BlockingQueue<PriceData> source2Queue = new LinkedBlockingQueue<>();
+
+        populateTestData(source1Queue, source2Queue);
+
+        ReportService reportService = new ReportService(outputDir);
+        PriceDataCompareService compareService = new PriceDataCompareService();
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<?> compareFuture = executor.submit(
+            compareService.createBatchCompareTask(
+                source1Queue, source2Queue, reportService, schemaName, Duration.ofSeconds(60))
+        );
+
+        compareFuture.get();
+        executor.shutdown();
+        LOGGER.info("Comparison complete. Application exiting.");
+    }
+
+    private static void populateTestData(BlockingQueue<PriceData> q1, BlockingQueue<PriceData> q2) {
+        Timestamp now = Timestamps.fromMillis(Instant.now().toEpochMilli());
+
+        PriceData a = PriceData.newBuilder()
+            .setId("id-1")
+            .setAvailable(com.google.protobuf.BoolValue.of(true))
+            .setPrice(com.google.protobuf.DoubleValue.of(123.4567))
+            .setCurrency(com.google.protobuf.StringValue.of("USD"))
+            .setTimestamp(now)
+            .setDetails(PriceData.Details.newBuilder().setRegion("US").build())
+            .build();
+
+        PriceData b = PriceData.newBuilder()
+            .setId("id-1")
+            .setAvailable(com.google.protobuf.BoolValue.of(true))
+            .setPrice(com.google.protobuf.DoubleValue.of(123.45999))
+            .setCurrency(com.google.protobuf.StringValue.of("USD"))
+            .setTimestamp(now)
+            .setDetails(PriceData.Details.newBuilder().setRegion("EU").build())
+            .build();
+
+        PriceData c = PriceData.newBuilder()
+            .setId("id-2")
+            .setAvailable(com.google.protobuf.BoolValue.of(false))
+            .setPrice(com.google.protobuf.DoubleValue.of(99.99))
+            .setCurrency(com.google.protobuf.StringValue.of("EUR"))
+            .setTimestamp(now)
+            .setDetails(PriceData.Details.newBuilder().setRegion("EU").build())
+            .build();
+
+        q1.add(a);
+        q1.add(c);
+        q2.add(b);
     }
 }
