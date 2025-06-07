@@ -1,443 +1,219 @@
-POM
+package com.example.compare;
 
-    <dependencies>
-  <!-- Kafka Clients -->
-  <dependency>
-    <groupId>org.apache.kafka</groupId>
-    <artifactId>kafka-clients</artifactId>
-    <version>3.5.0</version>
-  </dependency>
+import com.google.protobuf.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-  <!-- Protobuf -->
-  <dependency>
-    <groupId>com.google.protobuf</groupId>
-    <artifactId>protobuf-java</artifactId>
-    <version>3.23.4</version>
-  </dependency>
-
-  <!-- XML Processing -->
-  <dependency>
-    <groupId>javax.xml.bind</groupId>
-    <artifactId>jaxb-api</artifactId>
-    <version>2.3.1</version>
-  </dependency>
-
-  <!-- Logging -->
-  <dependency>
-    <groupId>org.slf4j</groupId>
-    <artifactId>slf4j-simple</artifactId>
-    <version>2.0.7</version>
-  </dependency>
-</dependencies>
-
-
-Properties
-
-        mode=kafka_to_file_to_kafka
-businessDate=2025-04-25
-baseDirectory=/path/to/base/directory
-topics=topic1,topic2
-topic1.className=com.example.protobuf.DdsMessage
-topic1.outputTopic=topic1-output
-topic2.className=com.example.protobuf.FixmlEquityMessage
-topic2.outputTopic=topic2-output
-
-
-FixmlObjectProcessor
-
-package com.example.util;
-
-import org.w3c.dom.*;
-import javax.xml.parsers.*;
-import javax.xml.transform.*;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
-import java.io.*;
-
-public class FixmlObjectProcessor {
-
-    public static String updateBizDateInXml(String xmlString, String newBizDate) throws Exception {
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        DocumentBuilder builder = factory.newDocumentBuilder();
-        Document doc;
-
-        try (InputStream is = new ByteArrayInputStream(xmlString.getBytes())) {
-            doc = builder.parse(is);
-        }
-
-        Element root = doc.getDocumentElement();
-        if (root.hasAttribute("bizdate")) {
-            root.setAttribute("bizdate", newBizDate);
-        }
-
-        TransformerFactory tf = TransformerFactory.newInstance();
-        Transformer transformer = tf.newTransformer();
-        StringWriter writer = new StringWriter();
-        transformer.transform(new DOMSource(doc), new StreamResult(writer));
-
-        return writer.getBuffer().toString();
-    }
-}
-
-
-Application
-
-package com.example;
-
-import com.example.service.KafkaToFileService;
-import com.example.service.FileToKafkaService;
-import java.util.*;
-import java.io.*;
-import java.nio.file.*;
-import java.time.*;
-import java.time.format.DateTimeFormatter;
-
-public class Application {
-
-    public static void main(String[] args) {
-        Properties properties = new Properties();
-        try (InputStream input = new FileInputStream("application.properties")) {
-            properties.load(input);
-        } catch (IOException ex) {
-            ex.printStackTrace();
-            return;
-        }
-
-        String mode = properties.getProperty("mode");
-        String businessDate = properties.getProperty("businessDate");
-        String baseDirectory = properties.getProperty("baseDirectory");
-        String topicsStr = properties.getProperty("topics");
-        String[] topics = topicsStr.split(",");
-
-        Map<String, String> topicClassMap = new HashMap<>();
-        Map<String, String> topicOutputMap = new HashMap<>();
-
-        for (String topic : topics) {
-            String className = properties.getProperty(topic + ".className");
-            String outputTopic = properties.getProperty(topic + ".outputTopic");
-            topicClassMap.put(topic, className);
-            topicOutputMap.put(topic, outputTopic);
-        }
-
-        if ("kafka_to_file_to_kafka".equalsIgnoreCase(mode)) {
-            KafkaToFileService kafkaToFileService = new KafkaToFileService();
-            kafkaToFileService.execute(topicClassMap, topicOutputMap, baseDirectory, businessDate);
-        } else if ("file_to_kafka".equalsIgnoreCase(mode)) {
-            FileToKafkaService fileToKafkaService = new FileToKafkaService();
-            fileToKafkaService.execute(topicClassMap, topicOutputMap, baseDirectory, businessDate);
-        } else {
-            System.out.println("Invalid mode specified in configuration.");
-        }
-    }
-}
-
-
-Kafkatofileservice full
-
-package com.example.service;
-
-import com.example.util.FixmlObjectProcessor;
-import com.google.protobuf.Message;
-import org.apache.kafka.clients.consumer.*;
-import org.apache.kafka.clients.producer.*;
-import org.apache.kafka.common.serialization.*;
-import java.io.*;
-import java.lang.reflect.Method;
-import java.nio.file.*;
-import java.time.*;
-import java.time.format.DateTimeFormatter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 
-public class KafkaToFileService {
+public interface CompareService<T extends Message> {
 
-    public void execute(Map<String, String> topicClassMap, Map<String, String> topicOutputMap,
-                        String baseDirectory, String businessDate) {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
-        Path outputDir = Paths.get(baseDirectory, timestamp);
-        try {
-            Files.createDirectories(outputDir);
-        } catch (IOException e) {
-            e.printStackTrace();
-            return;
-        }
+    Logger LOGGER = LoggerFactory.getLogger(CompareService.class);
 
-        ExecutorService executorService = Executors.newFixedThreadPool(topicClassMap.size());
+    String getPrimaryKey(T obj);
 
-        for (Map.Entry<String, String> entry : topicClassMap.entrySet()) {
-            String topic = entry.getKey();
-            String className = entry.getValue();
-            String outputTopic = topicOutputMap.get(topic);
-            executorService.submit(() -> processTopic(topic, className, outputTopic, outputDir, businessDate));
-        }
-
-        executorService.shutdown();
-        try {
-            executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+    default int getDecimalPrecision(String fieldPath) {
+        return 5;
     }
 
-    private void processTopic(String topic, String className, String outputTopic,
-                              Path outputDir, String businessDate) {
-        Properties consumerProps = new Properties();
-        consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "group-" + topic);
-        consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-        consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    default List<Difference> compare(T priceCache, T apiResponse) {
+        List<Difference> diffs = new ArrayList<>();
+        try {
+            Map<String, Object> fields1 = extractFields(priceCache, "");
+            Map<String, Object> fields2 = extractFields(apiResponse, "");
 
-        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerProps)) {
-            consumer.subscribe(Collections.singletonList(topic));
-            Path filePath = outputDir.resolve(topic + ".dat");
+            Set<String> allKeys = new HashSet<>(fields1.keySet());
+            allKeys.addAll(fields2.keySet());
 
-            try (OutputStream os = Files.newOutputStream(filePath, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-                while (true) {
-                    ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(1));
-                    if (records.isEmpty()) break;
+            for (String field : allKeys) {
+                Object v1 = fields1.get(field);
+                Object v2 = fields2.get(field);
 
-                    for (ConsumerRecord<String, byte[]> record : records) {
-                        byte[] messageBytes = record.value();
-                        os.write(intToBytes(messageBytes.length));
-                        os.write(messageBytes);
+                if (!equalsWithPrecision(field, v1, v2)) {
+                    diffs.add(new Difference(getPrimaryKey(priceCache), field, v1, v2, DifferenceType.VALUE_MISMATCH));
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("Error comparing messages", e);
+        }
+        return diffs;
+    }
+
+    default boolean equalsWithPrecision(String field, Object v1, Object v2) {
+        if (v1 == null || v2 == null) return Objects.equals(v1, v2);
+        if (v1 instanceof Double || v2 instanceof Double) {
+            double d1 = v1 instanceof Double ? (Double) v1 : Double.parseDouble(v1.toString());
+            double d2 = v2 instanceof Double ? (Double) v2 : Double.parseDouble(v2.toString());
+            int precision = getDecimalPrecision(field);
+            String format = "%1$." + precision + "f";
+            return String.format(format, d1).equals(String.format(format, d2));
+        }
+        return Objects.equals(v1, v2);
+    }
+
+    default Map<String, Object> extractFields(Message message, String prefix) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (Map.Entry<Descriptors.FieldDescriptor, Object> entry : message.getAllFields().entrySet()) {
+            String fieldName = prefix + entry.getKey().getName();
+            Object value = entry.getValue();
+
+            if (value instanceof Message) {
+                map.putAll(extractFields((Message) value, fieldName + "."));
+            } else {
+                map.put(fieldName, value);
+            }
+        }
+        return map;
+    }
+
+    default Runnable createStreamCompareTask(
+        BlockingQueue<T> priceCacheQueue,
+        BlockingQueue<T> apiResponseQueue,
+        ReportService reportService,
+        String schemaName
+    ) {
+        return () -> {
+            Map<String, T> cacheMap = new HashMap<>();
+            Map<String, T> apiMap = new HashMap<>();
+
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    T priceObj = priceCacheQueue.poll(1, TimeUnit.SECONDS);
+                    T apiObj = apiResponseQueue.poll(1, TimeUnit.SECONDS);
+
+                    if (priceObj != null) {
+                        String pk = getPrimaryKey(priceObj);
+                        LOGGER.info("[{}] Received PriceCache object with key: {}", schemaName, pk);
+                        cacheMap.put(pk, priceObj);
+                        if (apiMap.containsKey(pk)) {
+                            LOGGER.info("[{}] Matching ApiResponseObject found for key: {}", schemaName, pk);
+                            List<Difference> diff = compare(priceObj, apiMap.remove(pk));
+                            diff.forEach(d -> reportService.submitDifference(schemaName, d));
+                            cacheMap.remove(pk);
+                        }
+                    }
+
+                    if (apiObj != null) {
+                        String pk = getPrimaryKey(apiObj);
+                        LOGGER.info("[{}] Received ApiResponseObject with key: {}", schemaName, pk);
+                        apiMap.put(pk, apiObj);
+                        if (cacheMap.containsKey(pk)) {
+                            LOGGER.info("[{}] Matching PriceCache object found for key: {}", schemaName, pk);
+                            List<Difference> diff = compare(cacheMap.remove(pk), apiObj);
+                            diff.forEach(d -> reportService.submitDifference(schemaName, d));
+                            apiMap.remove(pk);
+                        }
                     }
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOGGER.info("[{}] Comparison task interrupted", schemaName);
             }
-
-            // After writing to file, read, update, and produce to Kafka
-            byte[] fileContent = Files.readAllBytes(filePath);
-            List<byte[]> messages = extractMessages(fileContent);
-
-            Properties producerProps = new Properties();
-            producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-            producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-            producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-
-            try (KafkaProducer<String, byte[]> producer = new KafkaProducer<>(producerProps)) {
-                for (byte[] messageBytes : messages) {
-                    Message message = deserializeMessage(messageBytes, className);
-                    Message updatedMessage = updateMessage(message, businessDate);
-                    byte[] updatedBytes = updatedMessage.toByteArray();
-                    ProducerRecord<String, byte[]> record = new ProducerRecord<>(outputTopic, updatedBytes);
-                    producer.send(record);
-                }
-            }
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private List<byte[]> extractMessages(byte[] fileContent) throws IOException {
-        List<byte[]> messages = new ArrayList<>();
-        ByteArrayInputStream bais = new ByteArrayInputStream(fileContent);
-        DataInputStream dis = new DataInputStream(bais);
-
-        while (dis.available() > 0) {
-            int length = dis.readInt();
-            byte[] messageBytes = new byte[length];
-            dis.readFully(messageBytes);
-            messages.add(messageBytes);
-        }
-
-        return messages;
-    }
-
-    private Message deserializeMessage(byte[] messageBytes, String className) throws Exception {
-        Class<?> clazz = Class.forName(className);
-        Method parseFrom = clazz.getMethod("parseFrom", byte[].class);
-        return (Message) parseFrom.invoke(null, messageBytes);
-    }
-
-    private Message updateMessage(Message message, String newBusinessDate) throws Exception {
-        // Assuming the message has a getPayload() method returning FixmlObject
-        Method getPayload = message.getClass().getMethod("getPayload");
-        Object payload = getPayload.invoke(message);
-
-        // Update businessDate
-        Method setBusinessDate = payload.getClass().getMethod("setBusinessDate", String.class);
-        setBusinessDate.invoke(payload, newBusinessDate);
-
-        // Update fixmlPayload
-        Method getFixmlPayload = payload.getClass().getMethod("getFixmlPayload");
-        String fixmlPayload = (String) getFixmlPayload.invoke(payload);
-        String updatedFixmlPayload = FixmlObjectProcessor.updateBizDateInXml(fixmlPayload, newBusinessDate);
-        Method setFixmlPayload = payload.getClass().getMethod("setFixmlPayload", String.class);
-        setFixmlPayload.invoke(payload, updatedFixmlPayload);
-
-        // Set the updated payload back to the message
-        Method setPayload = message.getClass().getMethod("setPayload", payload.getClass());
-        setPayload.invoke(message, payload);
-
-        return message;
-    }
-
-    private byte[] intToBytes(int value) {
-        return new byte[] {
-            (byte)(value >>> 24),
-            (byte)(value >>> 16),
-            (byte)(value >>> 8),
-            (byte)value
         };
     }
+
+    default void flushUnmatched(Map<String, T> source, DifferenceType type, ReportService reportService, String schemaName) {
+        for (Map.Entry<String, T> entry : source.entrySet()) {
+            LOGGER.info("[{}] Unmatched object with key: {} will be recorded as {}", schemaName, entry.getKey(), type);
+            reportService.submitDifference(schemaName, new Difference(entry.getKey(), "", entry.getValue().toString(), null, type));
+        }
+    }
 }
 
-Filetokafkaservice
+class Difference {
+    String primaryKey;
+    String fieldName;
+    Object value1;
+    Object value2;
+    DifferenceType type;
 
-package com.example.service;
-
-import com.example.util.FixmlObjectProcessor;
-import com.google.protobuf.Message;
-import org.apache.kafka.clients.producer.*;
-import org.apache.kafka.common.serialization.StringSerializer;
-
-import java.io.*;
-import java.lang.reflect.Method;
-import java.nio.file.*;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
-
-public class FileToKafkaService {
-
-    public void execute(Map<String, String> topicClassMap, Map<String, String> topicOutputMap,
-                        String baseDirectory, String businessDate) {
-        Path latestDir = getLatestTimestampedDirectory(baseDirectory);
-        if (latestDir == null) {
-            System.out.println("No timestamped directories found in base directory.");
-            return;
-        }
-
-        for (Map.Entry<String, String> entry : topicClassMap.entrySet()) {
-            String topic = entry.getKey();
-            String className = entry.getValue();
-            String outputTopic = topicOutputMap.get(topic);
-            Path filePath = latestDir.resolve(topic + ".dat");
-            if (!Files.exists(filePath)) {
-                System.out.println("File not found for topic: " + topic);
-                continue;
-            }
-            processFile(filePath, className, outputTopic, businessDate);
-        }
+    public Difference(String pk, String field, Object v1, Object v2, DifferenceType type) {
+        this.primaryKey = pk;
+        this.fieldName = field;
+        this.value1 = v1;
+        this.value2 = v2;
+        this.type = type;
     }
 
-    private Path getLatestTimestampedDirectory(String baseDirectory) {
-        try (Stream<Path> paths = Files.list(Paths.get(baseDirectory))) {
-            return paths.filter(Files::isDirectory)
-                    .max(Comparator.comparing(Path::getFileName))
-                    .orElse(null);
-        } catch (IOException e) {
-            e.printStackTrace();
-            return null;
-        }
+    public String toCSV() {
+        return String.join(",",
+                escape(primaryKey),
+                escape(fieldName),
+                escape(String.valueOf(value1)),
+                escape(String.valueOf(value2)),
+                type.name()
+        );
     }
 
-    private void processFile(Path filePath, String className, String outputTopic, String businessDate) {
+    private String escape(String s) {
+        return s == null ? "" : s.replaceAll(",", "\\,");
+    }
+}
+
+enum DifferenceType {
+    VALUE_MISMATCH,
+    MISSING_ROW
+}
+
+class ReportService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ReportService.class);
+    private final Map<String, BlockingQueue<Difference>> schemaQueues = new ConcurrentHashMap<>();
+    private final Map<String, FileWriter> writers = new ConcurrentHashMap<>();
+    private final Set<String> initializedSchemas = ConcurrentHashMap.newKeySet();
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final String outputDir;
+
+    public ReportService(String outputDir) {
+        this.outputDir = outputDir;
+        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
+    }
+
+    public void submitDifference(String schemaName, Difference diff) {
+        schemaQueues.computeIfAbsent(schemaName, k -> {
+            BlockingQueue<Difference> queue = new LinkedBlockingQueue<>();
+            executor.submit(() -> consume(schemaName, queue));
+            return queue;
+        }).offer(diff);
+    }
+
+    private void consume(String schemaName, BlockingQueue<Difference> queue) {
         try {
-            byte[] fileContent = Files.readAllBytes(filePath);
-            List<byte[]> messages = extractMessages(fileContent);
+            File file = Paths.get(outputDir, schemaName + "_diff_report.csv").toFile();
+            boolean writeHeader = !file.exists();
+            FileWriter writer = new FileWriter(file, true);
+            writers.put(schemaName, writer);
 
-            Properties producerProps = new Properties();
-            producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-            producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-            producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, org.apache.kafka.common.serialization.ByteArraySerializer.class.getName());
+            if (writeHeader) {
+                writer.write("primaryKey,fieldName,value1,value2,differenceType\n");
+            }
 
-            try (KafkaProducer<String, byte[]> producer = new KafkaProducer<>(producerProps)) {
-                for (byte[] messageBytes : messages) {
-                    Message message = deserializeMessage(messageBytes, className);
-                    Message updatedMessage = updateMessage(message, businessDate);
-                    byte[] updatedBytes = updatedMessage.toByteArray();
-                    ProducerRecord<String, byte[]> record = new ProducerRecord<>(outputTopic, updatedBytes);
-                    producer.send(record);
+            while (true) {
+                Difference diff = queue.poll(5, TimeUnit.SECONDS);
+                if (diff != null) {
+                    LOGGER.info("[{}] Writing difference to CSV: {}", schemaName, diff);
+                    writer.write(diff.toCSV() + "\n");
+                    writer.flush();
                 }
             }
-
         } catch (Exception e) {
-            e.printStackTrace();
+            LOGGER.error("[{}] Error while writing report", schemaName, e);
         }
     }
 
-    private List<byte[]> extractMessages(byte[] fileContent) throws IOException {
-        List<byte[]> messages = new ArrayList<>();
-        ByteArrayInputStream bais = new ByteArrayInputStream(fileContent);
-        DataInputStream dis = new DataInputStream(bais);
-
-        while (dis.available() > 0) {
-            int length = dis.readInt();
-            byte[] messageBytes = new byte[length];
-            dis.readFully(messageBytes);
-            messages.add(messageBytes);
-        }
-
-        return messages;
-    }
-
-    private Message deserializeMessage(byte[] messageBytes, String className) throws Exception {
-        Class<?> clazz = Class.forName(className);
-        Method parseFrom = clazz.getMethod("parseFrom", byte[].class);
-        return (Message) parseFrom.invoke(null, messageBytes);
-    }
-
-    private Message updateMessage(Message message, String newBusinessDate) throws Exception {
-        Method getPayload = message.getClass().getMethod("getPayload");
-        Object payload = getPayload.invoke(message);
-
-        Method getFixmlPayload = payload.getClass().getMethod("getFixmlPayload");
-        String fixmlPayload = (String) getFixmlPayload.invoke(payload);
-        String updatedFixmlPayload = FixmlObjectProcessor.updateBizDateInXml(fixmlPayload, newBusinessDate);
-
-        Method setBusinessDate = payload.getClass().getMethod("setBusinessDate", String.class);
-        setBusinessDate.invoke(payload, newBusinessDate);
-
-        Method setFixmlPayload = payload.getClass().getMethod("setFixmlPayload", String.class);
-        setFixmlPayload.invoke(payload, updatedFixmlPayload);
-
-        Method setPayload = message.getClass().getMethod("setPayload", payload.getClass());
-        setPayload.invoke(message, payload);
-
-        return message;
-    }
-}
-
-
-import org.w3c.dom.*;
-import javax.xml.parsers.*;
-import javax.xml.transform.*;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
-import java.io.*;
-
-public class FixmlUpdater {
-
-    public static String updateBizDt(String xml, String newDate) throws Exception {
-        DocumentBuilderFactory dbFactory = DocumentBuilderFactory.newInstance();
-        dbFactory.setNamespaceAware(false);
-        DocumentBuilder dBuilder = dbFactory.newDocumentBuilder();
-        Document doc = dBuilder.parse(new ByteArrayInputStream(xml.getBytes()));
-
-        // Update all elements with attribute BizDt
-        NodeList allElements = doc.getElementsByTagName("*");
-        for (int i = 0; i < allElements.getLength(); i++) {
-            Element element = (Element) allElements.item(i);
-            if (element.hasAttribute("BizDt")) {
-                element.setAttribute("BizDt", newDate);
+    private void shutdown() {
+        LOGGER.info("Shutting down report writers");
+        writers.forEach((schema, writer) -> {
+            try {
+                writer.close();
+            } catch (IOException e) {
+                LOGGER.error("Error closing writer for schema: {}", schema, e);
             }
-        }
-
-        // Convert DOM back to string
-        Transformer transformer = TransformerFactory.newInstance().newTransformer();
-        transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
-        StringWriter writer = new StringWriter();
-        transformer.transform(new DOMSource(doc), new StreamResult(writer));
-
-        return writer.toString();
-    }
-
-    public static void main(String[] args) throws Exception {
-        String originalFixml = "";
-        String updatedFixml = updateBizDt(originalFixml, "2025-04-26");
-        System.out.println(updatedFixml);
+        });
+        executor.shutdownNow();
     }
 }
-        
