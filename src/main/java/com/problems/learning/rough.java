@@ -217,3 +217,79 @@ class ReportService {
         executor.shutdownNow();
     }
 }
+
+
+
+
+
+
+
+
+package com.example.compare;
+
+import com.example.proto.PriceData;
+import com.google.protobuf.util.Timestamps;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.util.concurrent.*;
+
+public class ProtoCompareMain {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProtoCompareMain.class);
+
+    public static void main(String[] args) throws Exception {
+        String schemaName = "PriceData";
+        String outputDir = "./output";
+        new File(outputDir).mkdirs();
+
+        BlockingQueue<PriceData> priceCacheQueue = new LinkedBlockingQueue<>();
+        BlockingQueue<PriceData> apiResponseQueue = new LinkedBlockingQueue<>();
+
+        // Populate queues with dummy data
+        PriceData price1 = PriceData.newBuilder()
+                .setId("ITEM123")
+                .setActive(true)
+                .setCurrency("USD")
+                .setAmount(com.google.protobuf.DoubleValue.of(12.345678))
+                .setTimestamp(Timestamps.fromMillis(System.currentTimeMillis()))
+                .setMeta(PriceData.Meta.newBuilder().setSource("internal").build())
+                .build();
+
+        PriceData api1 = PriceData.newBuilder()
+                .setId("ITEM123")
+                .setActive(true)
+                .setCurrency("USD")
+                .setAmount(com.google.protobuf.DoubleValue.of(12.3456))
+                .setTimestamp(price1.getTimestamp())
+                .setMeta(PriceData.Meta.newBuilder().setSource("external").build())
+                .build();
+
+        priceCacheQueue.offer(price1);
+        apiResponseQueue.offer(api1);
+
+        ReportService reportService = new ReportService(outputDir);
+        PriceDataCompareService compareService = new PriceDataCompareService();
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.submit(compareService.createStreamCompareTask(priceCacheQueue, apiResponseQueue, reportService, schemaName));
+
+        // Allow time for processing
+        Thread.sleep(5000);
+        executor.shutdownNow();
+    }
+}
+
+class PriceDataCompareService implements CompareService<PriceData> {
+    @Override
+    public String getPrimaryKey(PriceData obj) {
+        return obj.getId();
+    }
+
+    @Override
+    public int getDecimalPrecision(String fieldPath) {
+        // custom precision logic
+        if (fieldPath.endsWith("amount")) return 4;
+        return CompareService.super.getDecimalPrecision(fieldPath);
+    }
+}
