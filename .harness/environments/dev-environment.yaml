@@ -1,0 +1,29 @@
+environment:
+  name: Development Environment
+  identifier: dev
+  description: Development environment for testing deployments
+  type: PreProduction
+  tags:
+    environment: dev
+    team: development
+  variables:
+    - name: ssh_user
+      type: String
+      description: SSH user for connecting to development servers
+      value: deploy-dev
+    - name: db_host
+      type: String
+      description: Database host for development
+      value: dev-db.internal.com
+    - name: app_port
+      type: String
+      description: Application port
+      value: "8080"
+    - name: log_level
+      type: String
+      description: Application log level
+      value: DEBUG
+  overrides:
+    manifests: []
+    configFiles: []
+    variables: []

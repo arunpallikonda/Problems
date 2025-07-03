@@ -1,0 +1,24 @@
+infrastructureDefinition:
+  name: Production Infrastructure
+  identifier: production_infrastructure
+  description: SSH-based infrastructure for production environment
+  tags:
+    environment: production
+    type: ssh
+  environmentRef: production
+  deploymentType: Ssh
+  type: SshWinRm
+  spec:
+    connectorRef: production_ssh_connector
+    hosts:
+      - hostname: prod-server-01.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+      - hostname: prod-server-02.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+      - hostname: prod-server-03.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+    credentialsRef: production_ssh_credentials
+  allowSimultaneousDeployments: false

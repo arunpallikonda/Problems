@@ -1,0 +1,21 @@
+infrastructureDefinition:
+  name: Staging Infrastructure
+  identifier: staging_infrastructure
+  description: SSH-based infrastructure for staging environment
+  tags:
+    environment: staging
+    type: ssh
+  environmentRef: staging
+  deploymentType: Ssh
+  type: SshWinRm
+  spec:
+    connectorRef: staging_ssh_connector
+    hosts:
+      - hostname: staging-server-01.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+      - hostname: staging-server-02.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+    credentialsRef: staging_ssh_credentials
+  allowSimultaneousDeployments: false

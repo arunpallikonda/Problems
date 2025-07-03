@@ -1,0 +1,41 @@
+service:
+  name: Application Service
+  identifier: application_service
+  description: Main application service for deployment
+  tags:
+    type: application
+    team: development
+  serviceDefinition:
+    type: Ssh
+    spec:
+      manifests: []
+      configFiles:
+        - configFile:
+            identifier: app_config
+            spec:
+              store:
+                type: Harness
+                spec:
+                  files:
+                    - /config/application.properties
+              subPath: ""
+      variables:
+        - name: app_version
+          type: String
+          description: Application version to deploy
+          value: <+input>
+        - name: heap_size
+          type: String
+          description: JVM heap size
+          value: "512m"
+      artifacts:
+        sidecars: []
+        primary:
+          primaryArtifactRef: <+input>
+          sources:
+            - spec:
+                connectorRef: artifact_repository
+                artifactPath: <+input>
+                tag: <+input>
+              identifier: application_artifact
+              type: DockerRegistry

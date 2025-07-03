@@ -1,0 +1,21 @@
+infrastructureDefinition:
+  name: Development Infrastructure
+  identifier: dev_infrastructure
+  description: SSH-based infrastructure for development environment
+  tags:
+    environment: dev
+    type: ssh
+  environmentRef: dev
+  deploymentType: Ssh
+  type: SshWinRm
+  spec:
+    connectorRef: dev_ssh_connector
+    hosts:
+      - hostname: dev-server-01.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+      - hostname: dev-server-02.internal.com
+        attributes:
+          user: <+env.variables.ssh_user>
+    credentialsRef: dev_ssh_credentials
+  allowSimultaneousDeployments: false

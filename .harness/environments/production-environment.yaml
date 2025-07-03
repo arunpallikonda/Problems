@@ -1,0 +1,29 @@
+environment:
+  name: Production Environment
+  identifier: production
+  description: Production environment for live deployments
+  type: Production
+  tags:
+    environment: production
+    team: operations
+  variables:
+    - name: ssh_user
+      type: String
+      description: SSH user for connecting to production servers
+      value: deploy-prod
+    - name: db_host
+      type: String
+      description: Database host for production
+      value: prod-db.internal.com
+    - name: app_port
+      type: String
+      description: Application port
+      value: "80"
+    - name: log_level
+      type: String
+      description: Application log level
+      value: ERROR
+  overrides:
+    manifests: []
+    configFiles: []
+    variables: []

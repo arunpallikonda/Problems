@@ -1,0 +1,246 @@
+pipeline:
+  name: Deployment Pipeline with Environment Selection
+  identifier: deployment_pipeline_env_selection
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  tags: {}
+  stages:
+    - stage:
+        name: Deploy to Selected Environment
+        identifier: deploy_to_selected_environment
+        description: Deploy using selected environment and variables
+        type: Deployment
+        spec:
+          deploymentType: Ssh
+          service:
+            serviceRef: <+input>
+            serviceInputs: <+input>
+          environment:
+            environmentRef: <+input>.allowedValues(dev,staging,production)
+            deployToAll: false
+            environmentInputs: <+input>
+            serviceOverrideInputs: <+input>
+            infrastructureDefinitions:
+              - identifier: <+input>
+          execution:
+            steps:
+              - step:
+                  name: Pre-deployment Health Check
+                  identifier: pre_deployment_health_check
+                  template:
+                    templateRef: account.health_check_template
+                    versionLabel: v1
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    onDelegate: false
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          echo "=== Pre-deployment Health Check ==="
+                          echo "Environment: <+env.name>"
+                          echo "Selected Service Type: <+pipeline.variables.service_type>"
+                          echo "Deployment Mode: <+pipeline.variables.deployment_mode>"
+                          echo "User: $(whoami)"
+                          echo "Date: $(date)"
+                          
+                          # Check system resources
+                          echo "=== System Resources ==="
+                          df -h
+                          free -m
+                          uptime
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 5m
+              - step:
+                  name: Execute Custom Scripts
+                  identifier: execute_custom_scripts
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    onDelegate: false
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          echo "=== Custom Script Execution ==="
+                          echo "Environment: <+env.name>"
+                          echo "Service Type: <+pipeline.variables.service_type>"
+                          echo "Deployment Mode: <+pipeline.variables.deployment_mode>"
+                          echo "Database Action: <+pipeline.variables.database_action>"
+                          echo "Environment User: <+env.variables.ssh_user>"
+                          
+                          # Switch based on service type
+                          case "<+pipeline.variables.service_type>" in
+                            "web_service")
+                              echo "Deploying Web Service..."
+                              # Web service deployment commands
+                              sudo systemctl stop nginx || true
+                              echo "Web service deployment completed"
+                              ;;
+                            "api_service")
+                              echo "Deploying API Service..."
+                              # API service deployment commands
+                              sudo systemctl stop tomcat || true
+                              echo "API service deployment completed"
+                              ;;
+                            "database_service")
+                              echo "Deploying Database Service..."
+                              # Database service deployment commands
+                              sudo systemctl stop mysql || true
+                              echo "Database service deployment completed"
+                              ;;
+                            *)
+                              echo "Unknown service type: <+pipeline.variables.service_type>"
+                              exit 1
+                              ;;
+                          esac
+                          
+                          # Handle database actions
+                          if [ "<+pipeline.variables.database_action>" != "none" ]; then
+                            echo "Executing database action: <+pipeline.variables.database_action>"
+                            case "<+pipeline.variables.database_action>" in
+                              "migrate")
+                                echo "Running database migrations..."
+                                # Add your migration commands here
+                                ;;
+                              "backup")
+                                echo "Creating database backup..."
+                                # Add your backup commands here
+                                ;;
+                              "restore")
+                                echo "Restoring database..."
+                                # Add your restore commands here
+                                ;;
+                            esac
+                          fi
+                    environmentVariables:
+                      - name: DEPLOY_ENV
+                        type: String
+                        value: <+env.name>
+                      - name: SERVICE_TYPE
+                        type: String
+                        value: <+pipeline.variables.service_type>
+                    outputVariables:
+                      - name: deployment_status
+                        type: String
+                        value: deployment_status
+                  timeout: 15m
+              - step:
+                  name: Post-deployment Verification
+                  identifier: post_deployment_verification
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    onDelegate: false
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          echo "=== Post-deployment Verification ==="
+                          echo "Environment: <+env.name>"
+                          echo "Deployment Mode: <+pipeline.variables.deployment_mode>"
+                          
+                          # Health checks based on deployment mode
+                          if [ "<+pipeline.variables.deployment_mode>" == "blue_green" ]; then
+                            echo "Running Blue-Green deployment verification..."
+                            # Add blue-green specific checks
+                          elif [ "<+pipeline.variables.deployment_mode>" == "canary" ]; then
+                            echo "Running Canary deployment verification..."
+                            # Add canary specific checks
+                          else
+                            echo "Running standard deployment verification..."
+                          fi
+                          
+                          # Generic health checks
+                          echo "Service status check..."
+                          # Add your service health check commands here
+                          
+                          echo "Deployment verification completed successfully"
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 10m
+            rollbackSteps:
+              - step:
+                  name: Rollback Actions
+                  identifier: rollback_actions
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    onDelegate: false
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          echo "=== Executing Rollback ==="
+                          echo "Environment: <+env.name>"
+                          echo "Service Type: <+pipeline.variables.service_type>"
+                          
+                          # Rollback based on service type
+                          case "<+pipeline.variables.service_type>" in
+                            "web_service")
+                              echo "Rolling back Web Service..."
+                              # Web service rollback commands
+                              ;;
+                            "api_service")
+                              echo "Rolling back API Service..."
+                              # API service rollback commands
+                              ;;
+                            "database_service")
+                              echo "Rolling back Database Service..."
+                              # Database service rollback commands
+                              ;;
+                          esac
+                          
+                          echo "Rollback completed"
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 10m
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+  variables:
+    - name: service_type
+      type: String
+      description: Select the type of service to deploy
+      required: true
+      value: <+input>.allowedValues(web_service,api_service,database_service)
+    - name: deployment_mode
+      type: String
+      description: Select deployment strategy
+      required: true
+      value: <+input>.allowedValues(rolling,blue_green,canary)
+    - name: database_action
+      type: String
+      description: Database action to perform
+      required: false
+      value: <+input>.allowedValues(none,migrate,backup,restore)
+    - name: notification_channels
+      type: String
+      description: Notification channels for deployment status
+      required: false
+      value: <+input>.allowedValues(email,slack,teams,none)
+  notificationRules:
+    - name: Deployment Notification
+      identifier: deployment_notification
+      pipelineEvents:
+        - type: PipelineSuccess
+        - type: PipelineFailure
+      notificationMethod:
+        type: Email
+        spec:
+          userGroups: []
+          recipients:
+            - <+pipeline.variables.notification_channels>
+      enabled: true
