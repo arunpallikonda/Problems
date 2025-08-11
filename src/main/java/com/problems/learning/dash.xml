@@ -1,1 +1,7 @@
 
+<input type="dropdown" token="env_filter">
+  <label>Select Environment</label>
+  <choice value='index="dev_index" host="dev_host" sourcetype="dev_sourcetype"'>DEV-Q0</choice>
+  <choice value='index="prod_index" host="prod_host" sourcetype="prod_sourcetype"'>PROD</choice>
+  <default>index="dev_index" host="dev_host" sourcetype="dev_sourcetype"</default>
+</input>
