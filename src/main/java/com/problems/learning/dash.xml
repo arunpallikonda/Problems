@@ -1,7 +1,36 @@
+<dashboard>
+  <label>RDS Adapter Splunk Dashboard</label>
+  <description>Switch between environments using index/host/sourcetype</description>
+  
+  <form>
+    <!-- Environment Selection -->
+    <input type="dropdown" token="env_filter">
+      <label>Select Environment</label>
+      <choice value='index="dev_index" host="dev_host" sourcetype="dev_sourcetype"'>DEV-Q0</choice>
+      <choice value='index="prod_index" host="prod_host" sourcetype="prod_sourcetype"'>PROD</choice>
+      <default>index="dev_index" host="dev_host" sourcetype="dev_sourcetype"</default>
+    </input>
 
-<input type="dropdown" token="env_filter">
-  <label>Select Environment</label>
-  <choice value='index="dev_index" host="dev_host" sourcetype="dev_sourcetype"'>DEV-Q0</choice>
-  <choice value='index="prod_index" host="prod_host" sourcetype="prod_sourcetype"'>PROD</choice>
-  <default>index="dev_index" host="dev_host" sourcetype="dev_sourcetype"</default>
-</input>
+    <!-- First row of panels -->
+    <row>
+      <panel>
+        <title>Event Count by Source</title>
+        <chart>
+          <search>
+            <query>$env_filter$ | stats count by source</query>
+          </search>
+          <option name="charting.chart">bar</option>
+        </chart>
+      </panel>
+      
+      <panel>
+        <title>Top Hosts</title>
+        <table>
+          <search>
+            <query>$env_filter$ | top limit=10 host</query>
+          </search>
+        </table>
+      </panel>
+    </row>
+  </form>
+</dashboard>
