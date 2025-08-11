@@ -1,8 +1,8 @@
 <form version="1.1">
   <label>RDS Adapter Splunk Dashboard</label>
-  <description>Switch between environments using index/host/sourcetype</description>
+  <description>Switch between environments and time ranges</description>
 
-  <!-- Environment Selection -->
+  <!-- Environment Picker -->
   <input type="dropdown" token="env_filter">
     <label>Select Environment</label>
     <choice value='index="dev_index" host="dev_host" sourcetype="dev_sourcetype"'>DEV-Q0</choice>
@@ -10,13 +10,22 @@
     <default>index="dev_index" host="dev_host" sourcetype="dev_sourcetype"</default>
   </input>
 
-  <!-- First row of panels -->
+  <!-- Time Picker -->
+  <input type="time" token="time_range">
+    <label>Select Time Range</label>
+    <default>
+      <earliest>-24h@h</earliest>
+      <latest>now</latest>
+    </default>
+  </input>
+
+  <!-- Example Panels -->
   <row>
     <panel>
       <title>Event Count by Source</title>
       <chart>
         <search>
-          <query>$env_filter$ | stats count by source</query>
+          <query>$env_filter$ earliest=$time_range.earliest$ latest=$time_range.latest$ | stats count by source</query>
         </search>
         <option name="charting.chart">bar</option>
       </chart>
@@ -26,7 +35,7 @@
       <title>Top Hosts</title>
       <table>
         <search>
-          <query>$env_filter$ | top limit=10 host</query>
+          <query>$env_filter$ earliest=$time_range.earliest$ latest=$time_range.latest$ | top limit=10 host</query>
         </search>
       </table>
     </panel>
