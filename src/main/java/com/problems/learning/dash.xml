@@ -1,31 +1,41 @@
-<form version="1.1">
+<form>
   <label>RDS Adapter Splunk Dashboard</label>
   <description>Switch between environments and time ranges</description>
 
-  <!-- Environment Picker -->
-  <input type="dropdown" token="env_filter">
-    <label>Select Environment</label>
-    <choice value='index="dev_index" host="dev_host" sourcetype="dev_sourcetype"'>DEV-Q0</choice>
-    <choice value='index="prod_index" host="prod_host" sourcetype="prod_sourcetype"'>PROD</choice>
-    <default>index="dev_index" host="dev_host" sourcetype="dev_sourcetype"</default>
-  </input>
+  <fieldset submitButton="false">
+    <!-- Environment dropdown -->
+    <input type="dropdown" token="env">
+      <label>Environment</label>
+      <choice value="DEV">DEV</choice>
+      <choice value="PROD">PROD</choice>
+      <default>DEV</default>
+      <change>
+        <eval token="index">case($env$="DEV","dev_index",$env$="PROD","prod_index","*")</eval>
+        <eval token="host">case($env$="DEV","dev_host",$env$="PROD","prod_host","*")</eval>
+        <eval token="sourcetype">case($env$="DEV","dev_sourcetype",$env$="PROD","prod_sourcetype","*")</eval>
+      </change>
+    </input>
 
-  <!-- Time Picker -->
-  <input type="time" token="time_range">
-    <label>Select Time Range</label>
-    <default>
-      <earliest>-24h@h</earliest>
-      <latest>now</latest>
-    </default>
-  </input>
+    <!-- Time picker -->
+    <input type="time" token="time_range">
+      <label>Select Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
 
-  <!-- Example Panels -->
+  <!-- Panels -->
   <row>
     <panel>
       <title>Event Count by Source</title>
       <chart>
         <search>
-          <query>$env_filter$ earliest=$time_range.earliest$ latest=$time_range.latest$ | stats count by source</query>
+          <query>index=$index$ host=$host$ sourcetype=$sourcetype$
+| stats count by source</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
         </search>
         <option name="charting.chart">bar</option>
       </chart>
@@ -35,7 +45,10 @@
       <title>Top Hosts</title>
       <table>
         <search>
-          <query>$env_filter$ earliest=$time_range.earliest$ latest=$time_range.latest$ | top limit=10 host</query>
+          <query>index=$index$ sourcetype=$sourcetype$
+| top limit=10 host</query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
         </search>
       </table>
     </panel>
