@@ -1,8 +1,8 @@
 <form version="1.1">
   <label>RDS Adapter Splunk Dashboard</label>
-  <description>Switch between environments and time ranges</description>
+  <description>Switch between environments, time range, and a shared auto-refresh</description>
 
-  <!-- Ensure tokens are set on first load -->
+  <!-- Seed tokens so searches run immediately -->
   <init>
     <set token="env">EXTQ0</set>
     <set token="index">qts_dev_apps</set>
@@ -10,23 +10,26 @@
     <set token="sourcetype">rds-adapter</set>
     <set token="earliest">-60m@m</set>
     <set token="latest">now</set>
+    <set token="refresh_input">10</set>
+    <set token="refresh">10</set>
   </init>
 
   <fieldset submitButton="false">
-    <!-- Environment -->
+    <!-- Environment picker -->
     <input type="dropdown" token="env">
       <label>Environment</label>
       <choice value="EXTQ0">EXTQ0</choice>
       <choice value="PROD">PROD</choice>
       <default>EXTQ0</default>
       <change>
+        <!-- Map env -> index/host/sourcetype -->
         <eval token="index">case($env$="EXTQ0","qts_dev_apps",$env$="PROD","prod_index","*")</eval>
         <eval token="host">case($env$="EXTQ0","xaapktprxp",$env$="PROD","prod_host","*")</eval>
         <eval token="sourcetype">case($env$="EXTQ0","rds-adapter",$env$="PROD","prod_sourcetype","*")</eval>
       </change>
     </input>
 
-    <!-- Time -->
+    <!-- Time picker (applies to every panel via earliest/latest tokens) -->
     <input type="time">
       <label>Select Time Range</label>
       <default>
@@ -38,9 +41,19 @@
         <set token="latest">$latest$</set>
       </change>
     </input>
+
+    <!-- Shared auto-refresh in seconds (5..300) -->
+    <input type="text" token="refresh_input">
+      <label>Auto-Refresh (seconds, 5–300)</label>
+      <default>10</default>
+      <change>
+        <!-- Validate and clamp to [5,300]; fallback to 10 if invalid -->
+        <eval token="refresh">if(isnum($refresh_input$) AND $refresh_input$>=5 AND $refresh_input$<=300, $refresh_input$, 10)</eval>
+      </change>
+    </input>
   </fieldset>
 
-  <!-- Single tile: case-insensitive "error" count; refresh every 10s -->
+  <!-- Panels -->
   <row>
     <panel>
       <title>Error Event Count</title>
@@ -53,7 +66,8 @@
           </query>
           <earliest>$earliest$</earliest>
           <latest>$latest$</latest>
-          <refresh>10</refresh>
+          <!-- Shared auto-refresh -->
+          <refresh>$refresh$</refresh>
           <refreshType>delay</refreshType>
         </search>
         <option name="numberPrecision">0</option>
