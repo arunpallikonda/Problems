@@ -1,4 +1,4 @@
-<form>
+<form version="1.1">
   <label>RDS Adapter Splunk Dashboard</label>
   <description>Switch between environments and time ranges</description>
 
@@ -6,13 +6,13 @@
     <!-- Environment dropdown -->
     <input type="dropdown" token="env">
       <label>Environment</label>
-      <choice value="DEV">DEV</choice>
+      <choice value="EXTQ0">EXTQ0</choice>
       <choice value="PROD">PROD</choice>
-      <default>DEV</default>
+      <default>EXTQ0</default>
       <change>
-        <eval token="index">case($env$="DEV","dev_index",$env$="PROD","prod_index","*")</eval>
-        <eval token="host">case($env$="DEV","dev_host",$env$="PROD","prod_host","*")</eval>
-        <eval token="sourcetype">case($env$="DEV","dev_sourcetype",$env$="PROD","prod_sourcetype","*")</eval>
+        <eval token="index">case($env$="EXTQ0","qts_dev_apps",$env$="PROD","prod_index","*")</eval>
+        <eval token="host">case($env$="EXTQ0","xaapktprxp",$env$="PROD","prod_host","*")</eval>
+        <eval token="sourcetype">case($env$="EXTQ0","rds-adapter",$env$="PROD","prod_sourcetype","*")</eval>
       </change>
     </input>
 
@@ -26,31 +26,22 @@
     </input>
   </fieldset>
 
-  <!-- Panels -->
+  <!-- Single panel for error count -->
   <row>
     <panel>
-      <title>Event Count by Source</title>
-      <chart>
+      <title>Error Event Count</title>
+      <single>
         <search>
-          <query>index=$index$ host=$host$ sourcetype=$sourcetype$
-| stats count by source</query>
+          <query>index=$index$ host=$host$ sourcetype=$sourcetype$ 
+| search error 
+| stats count as "Error Count"</query>
           <earliest>$time_range.earliest$</earliest>
           <latest>$time_range.latest$</latest>
         </search>
-        <option name="charting.chart">bar</option>
-      </chart>
-    </panel>
-
-    <panel>
-      <title>Top Hosts</title>
-      <table>
-        <search>
-          <query>index=$index$ sourcetype=$sourcetype$
-| top limit=10 host</query>
-          <earliest>$time_range.earliest$</earliest>
-          <latest>$time_range.latest$</latest>
-        </search>
-      </table>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="numberPrecision">0</option>
+      </single>
     </panel>
   </row>
 </form>
