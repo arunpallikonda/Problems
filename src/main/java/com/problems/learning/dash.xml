@@ -1,4 +1,4 @@
-<dashboard>
+<dashboard version="1.1">
   <label>RDS Adapter Splunk Dashboard</label>
   <description>Switch between environments using index/host/sourcetype</description>
   
