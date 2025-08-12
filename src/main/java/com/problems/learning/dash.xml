@@ -1,80 +1,25 @@
-<form version="1.1">
-  <label>RDS Adapter Splunk Dashboard</label>
-  <description>Switch between environments, time range, and a shared auto-refresh</description>
-
-  <!-- Seed tokens so searches run immediately -->
-  <init>
-    <set token="env">EXTQ0</set>
-    <set token="index">qts_dev_apps</set>
-    <set token="host">xaapktprxp</set>
-    <set token="sourcetype">rds-adapter</set>
-    <set token="earliest">-60m@m</set>
-    <set token="latest">now</set>
-    <set token="refresh_input">10</set>
-    <set token="refresh">10</set>
-  </init>
-
-  <fieldset submitButton="false">
-    <!-- Environment picker -->
-    <input type="dropdown" token="env">
-      <label>Environment</label>
-      <choice value="EXTQ0">EXTQ0</choice>
-      <choice value="PROD">PROD</choice>
-      <default>EXTQ0</default>
-      <change>
-        <!-- Map env -> index/host/sourcetype -->
-        <eval token="index">case($env$="EXTQ0","qts_dev_apps",$env$="PROD","prod_index","*")</eval>
-        <eval token="host">case($env$="EXTQ0","xaapktprxp",$env$="PROD","prod_host","*")</eval>
-        <eval token="sourcetype">case($env$="EXTQ0","rds-adapter",$env$="PROD","prod_sourcetype","*")</eval>
-      </change>
-    </input>
-
-    <!-- Time picker (applies to every panel via earliest/latest tokens) -->
-    <input type="time">
-      <label>Select Time Range</label>
-      <default>
+<row>
+  <panel>
+    <title>Average Kafka Throughput (msg/sec)</title>
+    <single>
+      <search>
+        <query>
+          index=$index$ host=$host$ sourcetype=$sourcetype$
+          "KafkaEventProcessor processed"
+          | rex field=message "processed\s(?&lt;events&gt;\d+)\sevents;\selapsedTimeInMilli[sS]=(?&lt;millis&gt;\d+)"
+          | eval seconds = millis / 1000
+          | eval throughput = events / seconds
+          | stats avg(throughput) as "Avg Msg/sec"
+        </query>
         <earliest>$earliest$</earliest>
         <latest>$latest$</latest>
-      </default>
-      <change>
-        <set token="earliest">$earliest$</set>
-        <set token="latest">$latest$</set>
-      </change>
-    </input>
-
-    <!-- Shared auto-refresh in seconds (5..300) -->
-    <input type="text" token="refresh_input">
-      <label>Auto-Refresh (seconds, 5–300)</label>
-      <default>10</default>
-      <change>
-        <!-- Validate and clamp to [5,300]; fallback to 10 if invalid -->
-        <eval token="refresh">if(isnum($refresh_input$) AND $refresh_input$>=5 AND $refresh_input$<=300, $refresh_input$, 10)</eval>
-      </change>
-    </input>
-  </fieldset>
-
-  <!-- Panels -->
-  <row>
-    <panel>
-      <title>Error Event Count</title>
-      <single>
-        <search>
-          <query>
-            index=$index$ host=$host$ sourcetype=$sourcetype$
-            (status=error OR "error")
-            | stats count AS "Error Count"
-          </query>
-          <earliest>$earliest$</earliest>
-          <latest>$latest$</latest>
-          <!-- Shared auto-refresh -->
-          <refresh>$refresh$</refresh>
-          <refreshType>delay</refreshType>
-        </search>
-        <option name="numberPrecision">0</option>
-        <option name="useThousandSeparators">true</option>
-        <option name="colorMode">block</option>
-        <option name="colorBy">value</option>
-      </single>
-    </panel>
-  </row>
-</form>
+        <refresh>$refresh$</refresh>
+        <refreshType>delay</refreshType>
+      </search>
+      <option name="numberPrecision">2</option>
+      <option name="useThousandSeparators">true</option>
+      <option name="colorMode">block</option>
+      <option name="colorBy">value</option>
+    </single>
+  </panel>
+</row>
