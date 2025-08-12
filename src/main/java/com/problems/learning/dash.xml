@@ -1,25 +1,5 @@
-<row>
-  <panel>
-    <title>Average Kafka Throughput (msg/sec)</title>
-    <single>
-      <search>
-        <query>
-          index=$index$ host=$host$ sourcetype=$sourcetype$
-          "KafkaEventProcessor processed"
-          | rex field=message "processed\s(?&lt;events&gt;\d+)\sevents;\selapsedTimeInMilli[sS]=(?&lt;millis&gt;\d+)"
-          | eval seconds = millis / 1000
-          | eval throughput = events / seconds
-          | stats avg(throughput) as "Avg Msg/sec"
-        </query>
-        <earliest>$earliest$</earliest>
-        <latest>$latest$</latest>
-        <refresh>$refresh$</refresh>
-        <refreshType>delay</refreshType>
-      </search>
-      <option name="numberPrecision">2</option>
-      <option name="useThousandSeparators">true</option>
-      <option name="colorMode">block</option>
-      <option name="colorBy">value</option>
-    </single>
-  </panel>
-</row>
+index=qts_dev_apps host=xaapktprxp sourcetype=rds-adapter "KafkaEventProcessor processed"
+| rex field=message "(?i)processed\s+(?<events>\d+)\s+events;\s+elapsedTimeInMillis=(?<millis>\d+)"
+| eval seconds = millis / 1000
+| eval throughput = events / seconds
+| stats avg(throughput) as "Avg Msg/sec"
