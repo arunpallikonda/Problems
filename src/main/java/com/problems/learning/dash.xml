@@ -1,5 +1,109 @@
-index=qts_dev_apps host=xaapktprxp sourcetype=rds-adapter "KafkaEventProcessor processed"
-| rex field=message "(?i)processed\s+(?<events>\d+)\s+events;\s+elapsedTimeInMillis=(?<millis>\d+)"
-| eval seconds = millis / 1000
-| eval throughput = events / seconds
-| stats avg(throughput) as "Avg Msg/sec"
+<form version="1.1" theme="dark">
+  <label>RDS Adapter Splunk Dashboard</label>
+  <description>Switch between environments and time ranges</description>
+
+  <init>
+    <set token="env">EXTQ0</set>
+    <set token="index">qts_dev_apps</set>
+    <set token="host">xapxtprcp</set>
+    <set token="sourcetype">rds-adapter</set>
+    <set token="earliest">-24h@h</set>
+    <set token="latest">now</set>
+    <set token="refresh_input">5</set>
+    <set token="refresh">true</set>
+  </init>
+
+  <fieldset submitButton="false">
+
+    <!-- Environment -->
+    <input type="dropdown" token="env">
+      <label>Environment</label>
+      <choice value="EXTQ0">EXTQ0</choice>
+      <choice value="ORTQ0">ORTQ0</choice>
+      <default>EXTQ0</default>
+      <change>
+        <eval token="index">case($env$="EXTQ0", "qts_dev_apps", $env$="ORTQ0", "qts_dev_apps", "")</eval>
+        <eval token="host">case($env$="EXTQ0", "xapxtprcp", $env$="ORTQ0", "oapxtprcp", "")</eval>
+        <set token="refresh">true</set>
+      </change>
+    </input>
+
+    <!-- Time Picker -->
+    <input type="time" token="time">
+      <label>Select Time Range</label>
+      <default>
+        <earliest>$earliest$</earliest>
+        <latest>$latest$</latest>
+      </default>
+      <change>
+        <set token="earliest">$earliest$</set>
+        <set token="latest">$latest$</set>
+        <set token="refresh">true</set>
+      </change>
+    </input>
+
+    <!-- Auto-Refresh -->
+    <input type="text" token="refresh_input">
+      <label>Auto-Refresh (seconds, 5–300)</label>
+      <default>10</default>
+      <change>
+        <eval token="refresh">if(isnum($refresh_input$) AND $refresh_input$>=5 AND $refresh_input$<=300, "true", "false")</eval>
+      </change>
+    </input>
+
+  </fieldset>
+
+  <!-- Panels -->
+  <row>
+    <panel>
+      <title>Error Event Count</title>
+      <single>
+        <search>
+          <query>
+            index=$index$ host=$host$ sourcetype=$sourcetype$
+            | spath application 
+            | search application="rds-master-file-adapter" (status=error OR "error")
+            | sort - _time
+            | dedup date message level application
+            | stats count AS "Error Count"
+          </query>
+          <earliest>$earliest$</earliest>
+          <latest>$latest$</latest>
+          <refresh>$refresh$</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="numberPrecision">0</option>
+        <option name="useThousandSeparators">true</option>
+        <option name="colorMode">block</option>
+        <option name="colorBy">value</option>
+      </single>
+    </panel>
+
+    <panel>
+      <title>Average Kafka Processor rate (msg/sec)</title>
+      <single>
+        <search>
+          <query>
+            index=$index$ host=$host$ sourcetype=$sourcetype$
+            | spath application 
+            | search application="rds-master-file-adapter" "KafkaEventProcessor processed"
+            | dedup application date level message
+            | rex field=message "(?i)processed\s*:\s*(?&lt;events&gt;\d+)\s+events.elapsedTimeInMillis=\s(?&lt;millis&gt;\d+)"
+            | eval seconds = millis / 1000
+            | eval throughput = events / seconds
+            | stats avg(throughput) AS "Avg Msg/sec"
+          </query>
+          <earliest>$earliest$</earliest>
+          <latest>$latest$</latest>
+          <refresh>$refresh$</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="numberPrecision">4</option>
+        <option name="useThousandSeparators">true</option>
+        <option name="colorMode">block</option>
+        <option name="colorBy">value</option>
+      </single>
+    </panel>
+  </row>
+
+</form>
