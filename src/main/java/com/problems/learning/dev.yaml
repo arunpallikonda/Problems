@@ -1,0 +1,144 @@
+schemaVersion: 2.2.2
+metadata:
+  name: devworkspace-python
+  attributes:
+    # Make IntelliJ the default editor (Che/Dev Spaces)
+    che-editor: "che-incubator/che-idea/latest"   # ⚠️ use your org's IntelliJ editor id if different
+
+projects:
+  - name: workspace-python
+    git:
+      remotes:
+        origin: https://github.com/example/workspace-python.git   # ⚠️ your repo
+      checkoutFrom:
+        revision: master
+
+components:
+  - name: devspace
+    container:
+      image: docker-dev-virtual.artifactory.crit.theocc.net/devspaces/udi-rhel9:latest   # ⚠️ your base image
+      mountSources: true
+      sourceMapping: /projects
+      memoryLimit: 8Gi
+      memoryRequest: 4Gi
+      cpuLimit: "2"
+      cpuRequest: "1"
+      # Baseline env (also persisted to /etc/profile.d by a command below)
+      env:
+        - name: AWS_CA_BUNDLE
+          value: "/etc/ssl/certs/ca-bundle.crt"
+        - name: AWS_REGION
+          value: "us-east-2"
+        - name: AWS_PROFILE
+          value: "nc-dev-platform"
+        - name: CLAUDE_CODE_USE_BEDROCK
+          value: "1"
+        - name: ANTHROPIC_MODEL
+          value: "us.anthropic.claude-sonnet-4-20250514-v1:0"
+      volumeMounts:
+        - name: venv
+          path: /home/user/.venv
+    attributes:
+      container-overrides:
+        securityContext:
+          privileged: true
+
+  - name: venv
+    volume:
+      size: 1Gi
+
+commands:
+  # --- bootstrap & utilities ---------------------------------------------------
+  - id: persist-env
+    label: Persist AWS/Claude env to /etc/profile.d
+    component: devspace
+    exec:
+      commandLine: |
+        set -e
+        cat >/etc/profile.d/99-claude-env.sh <<'EOF'
+        export AWS_CA_BUNDLE="/etc/ssl/certs/ca-bundle.crt"
+        export AWS_REGION="us-east-2"
+        export AWS_PROFILE="nc-dev-platform"
+        export CLAUDE_CODE_USE_BEDROCK="1"
+        export ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-20250514-v1:0"
+        EOF
+        chmod +x /etc/profile.d/99-claude-env.sh
+
+  - id: install-node-and-claude
+    label: Install Node.js & Claude Code CLI
+    component: devspace
+    exec:
+      commandLine: |
+        set -e
+        if ! command -v node >/dev/null 2>&1; then
+          # RHEL9-based image: enable/install Node 20
+          dnf -y module enable nodejs:20 || true
+          dnf -y module install nodejs:20 || dnf -y install nodejs npm
+        fi
+        npm config set fund false || true
+        npm install -g @anthropic-ai/claude-code@1.0.55
+        claude --version || true
+
+  - id: aws-sso-login
+    label: AWS SSO login (interactive)
+    component: devspace
+    exec:
+      commandLine: aws sso login --profile=nc-dev-platform
+
+  - id: start-claude
+    label: Start Claude REPL
+    component: devspace
+    exec:
+      commandLine: claude
+      group:
+        kind: run
+
+  # --- Python workflow ---------------------------------------------------------
+  - id: python-create-venv
+    label: Create venv
+    component: devspace
+    exec:
+      commandLine: |
+        python3 -m venv /home/user/.venv
+        . /home/user/.venv/bin/activate
+        python -m pip install --upgrade pip
+
+  - id: python-install-reqs
+    label: pip install -r requirements.txt
+    component: devspace
+    exec:
+      commandLine: |
+        . /home/user/.venv/bin/activate
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+  - id: run-app
+    label: Run sample app
+    component: devspace
+    exec:
+      commandLine: |
+        . /home/user/.venv/bin/activate
+        python hello-world.py
+      group:
+        kind: run
+
+  # --- Optional: Gradle (mirrors your earlier setup) ---------------------------
+  - id: gradle
+    label: Install Gradle (optional)
+    component: devspace
+    exec:
+      commandLine: |
+        set -e
+        GRADLE_VERSION=8.5
+        cd /opt
+        curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle.zip
+        rm -rf /opt/gradle && mkdir -p /opt/gradle
+        unzip -q gradle.zip -d /opt/gradle && rm -f gradle.zip
+        echo 'export PATH=/opt/gradle/gradle-'${GRADLE_VERSION}'/bin:$PATH' >> /home/user/.bashrc
+
+events:
+  preStart: []
+  postStart:
+    - persist-env
+    - install-node-and-claude
+    - python-create-venv
+    # - gradle                   # uncomment if you want Gradle auto-installed
