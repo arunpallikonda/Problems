@@ -1,25 +1,73 @@
-<panel>
-  <title>Errors to pay attention (latest 10)</title>
-  <table>
-    <search>
-      <query>
-        index=$index$ host=$host$ sourcetype=$sourcetype$
-        | spath application message level environment method thread_name
-        | search application="rds-master-file-adapter" (status=error OR "error")
-        | eval msg=coalesce(message,_raw)
-        | sort 0 - _time
-        | dedup msg application level               /* remove dup lines that are the same */
-        | table _time level application msg
-        | head 10
-      </query>
-      <earliest>$earliest$</earliest>
-      <latest>$latest$</latest>
-      <refresh>$refresh$</refresh>
-      <refreshType>delay</refreshType>
-    </search>
-    <option name="count">10</option>
-    <option name="wrap">true</option>
-    <option name="dataOverlayMode">none</option>
-    <option name="drilldown">none</option>
-  </table>
-</panel>
+<dashboard version="1.1">
+  <label>Application Health</label>
+  <description>Overall health indicator: green = GOOD, red = BAD</description>
+
+  <!-- Time picker -->
+  <input type="time" token="time">
+    <label>Time Range</label>
+    <default>
+      <earliest>-15m</earliest>
+      <latest>now</latest>
+    </default>
+  </input>
+
+  <!-- Base search to compute health -->
+  <search id="health_search">
+    <!-- Replace index/source and logic with your own health query. 
+         Must yield health=1 for good, 0 for bad. -->
+    <query>
+      index=YOUR_INDEX source=health_check
+      | stats max(health) as status
+      | eval status_label=if(status==1,"GOOD","BAD"),
+             status_class=if(status==1,"good","bad")
+      | table status status_label status_class
+    </query>
+    <earliest>$time.earliest$</earliest>
+    <latest>$time.latest$</latest>
+    <done>
+      <set token="status_label">$result.status_label$</set>
+      <set token="status_class">$result.status_class$</set>
+      <set token="status_numeric">$result.status$</set>
+    </done>
+  </search>
+
+  <row>
+    <panel>
+      <title>Overall Status (Button)</title>
+      <html>
+        <![CDATA[
+        <style>
+          .health-btn {
+            display:inline-block; padding:14px 22px; border-radius:8px;
+            font-weight:600; color:#fff; text-align:center; min-width:160px;
+            box-shadow:0 2px 6px rgba(0,0,0,0.15);
+          }
+          .good { background:#2ecc40; }  /* green */
+          .bad  { background:#ff4d4f; }  /* red   */
+        </style>
+        <div class="health-btn $status_class$">$status_label$</div>
+        ]]>
+      </html>
+    </panel>
+
+    <!-- Optional: single-value block as a secondary indicator -->
+    <panel>
+      <title>Overall Status (Block)</title>
+      <single>
+        <search base="health_search">
+          <!-- Use the base results -->
+          <query>| fields status</query>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="colorBy">value</option>
+        <!-- Threshold at 0/1: 0 = red, 1 = green -->
+        <option name="rangeValues">0,1</option>
+        <option name="rangeColors">#ff4d4f,#2ecc40</option>
+        <option name="useColors">1</option>
+        <option name="drilldown">none</option>
+        <option name="showTrendIndicator">0</option>
+        <option name="showSparkline">0</option>
+      </single>
+    </panel>
+  </row>
+</dashboard>
