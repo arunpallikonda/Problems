@@ -109,3 +109,124 @@ EOF
       --alarm-actions "${EEM_ALARM_SNS_ARN:-}" || true
   fi
 }
+
+
+
+
+
+
+
+
+
+
+
+
+eem_health.service
+[Unit]
+Description=EEM health probe (emits log/metric)
+Wants=eem.service
+After=eem.service
+ConditionPathExists=/usr/local/bin/eem_health.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eem_health.sh
+User=root
+Group=root
+
+
+eem_health.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+svc="eem.service"
+
+if systemctl is-active --quiet "$svc"; then
+  logger -t autosys-health "OK: $svc active"
+  # optional: publish your own metric instead of procstat:
+  # aws cloudwatch put-metric-data --namespace "Autosys/Systemd" --metric-name "ServiceUp" --value 1 --dimensions Service=EEM
+  exit 0
+else
+  logger -t autosys-health "FAIL: $svc not active"
+  # optional: publish your own metric:
+  # aws cloudwatch put-metric-data --namespace "Autosys/Systemd" --metric-name "ServiceUp" --value 0 --dimensions Service=EEM
+  exit 2
+fi
+
+
+
+amazon-cloudwatch-agent.json
+{
+  "metrics": {
+    "append_dimensions": { "AutoScalingGroupName": "${aws:AutoScalingGroupName}", "InstanceId": "${aws:InstanceId}" },
+    "metrics_collected": {
+      "procstat": [
+        {
+          "pattern": "eem",
+          "measurement": ["pid_count"],
+          "metrics_collection_interval": 60
+        }
+      ]
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/messages",
+            "log_group_name": "/autosys/health",
+            "log_stream_name": "{instance_id}/messages",
+            "timestamp_format": "%b %d %H:%M:%S"
+          }
+        ]
+      }
+    }
+  }
+}
+
+
+override.conf
+[Service]
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+
+
+setup.sh
+install_eem_monitoring() {
+  set -euo pipefail
+
+  # copy pieces from your artifact location (adjust base path if different)
+  ART_ROOT="${EEM_SOURCE:-/cp-artifacts}/monitoring"
+
+  install -m 0755 "${ART_ROOT}/eem_health.sh" /usr/local/bin/eem_health.sh
+  mkdir -p /etc/systemd/system/eem.service.d
+  install -m 0644 "${ART_ROOT}/eem.service.d/override.conf" /etc/systemd/system/eem.service.d/override.conf
+  install -m 0644 "${ART_ROOT}/eem_health.service" /etc/systemd/system/eem_health.service
+  install -m 0644 "${ART_ROOT}/eem_health.timer"   /etc/systemd/system/eem_health.timer
+
+  mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+  install -m 0644 "${ART_ROOT}/amazon-cloudwatch-agent.json" /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+  systemctl daemon-reload
+  systemctl enable --now eem_health.timer
+
+  # If agent is present, load the config & start it
+  if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl >/dev/null; then
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+  fi
+}
+
+
+
+systemctl daemon-reload
+systemctl enable eem
+
+# NEW
+install_eem_monitoring
+
+
