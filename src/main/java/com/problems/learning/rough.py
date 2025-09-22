@@ -1,51 +1,111 @@
-What setup.sh does (bullet notes)
+setup_eem_systemd_monitoring() {
+  set -euo pipefail
 
-Bootstrap & environment detection
-	•	Enables strict bash (set -e) so the script stops on errors.
-	•	Uses IMDSv2 to fetch:
-	•	Token, instance ID, and the instance profile/role.
-	•	The EC2 Name tag and other tags to derive environment flags.
-	•	Sets $ENVIRONMENT (e.g., dev1, test, acpt, prod) from lifecycle/tag values.
-	•	Pulls a shared commons bundle from S3 into a temp dir and sources utils.sh (helpers used later).
+  # 1) Ensure auto-restart without touching your base unit
+  mkdir -p /etc/systemd/system/eem.service.d
+  cat >/etc/systemd/system/eem.service.d/override.conf <<'EOF'
+[Service]
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+EOF
 
-Per-environment config (LDAP/AD & hostnames)
-	•	Switches on $ENVIRONMENT to set:
-	•	Friendly instance label (e.g., atsyslab1, atsysdev1).
-	•	LDAP bind username and LDAP group search filters.
-	•	LDAP host:port (different in prod vs non-prod).
-	•	Computes hostnames and updates /etc/hosts so DX/EEM components resolve consistently.
+  # 2) Healthcheck script writes to syslog and optional metric
+  install -m 0755 /dev/stdin /usr/local/bin/eem_health.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+svc="eem.service"
+if systemctl is-active --quiet "$svc"; then
+  logger -t autosys-health "OK: $svc active"
+  # Uncomment to publish a direct metric instead of procstat:
+  # aws cloudwatch put-metric-data --namespace "Autosys/Systemd" --metric-name "ServiceUp" --value 1 --dimensions Service=EEM
+  exit 0
+else
+  logger -t autosys-health "FAIL: $svc not active"
+  # aws cloudwatch put-metric-data --namespace "Autosys/Systemd" --metric-name "ServiceUp" --value 0 --dimensions Service=EEM
+  exit 2
+fi
+EOF
 
-EEM paths, roles, and toolchain
-	•	Defines S3 source for the EEM payload (cp-artifacts/.../eem).
-	•	Reads the attached EEMRole from instance tags (used for auth/AWS calls).
-	•	Sets working dirs:
-	•	$EEM_IMAGE (e.g., EEMServer_12.0.4.0_linux.bin).
-	•	$EEM_HOME, $IGAT_HOME, $EIAM_HOME locations.
-	•	$JAVA_HOME path bundled with EEM.
-	•	Prepares install status messages/logs to trace progress.
+  # 3) systemd timer to run healthcheck every minute
+  cat >/etc/systemd/system/eem-health.service <<'EOF'
+[Unit]
+Description=EEM health probe
+Wants=eem.service
+After=eem.service
+ConditionPathExists=/usr/local/bin/eem_health.sh
 
-Helper functions
-	•	setup_dsa_user(): creates/ensures the service account (e.g., dsa, fixed UID), sets shell/home; idempotent.
-	•	install_eem_image(): runs the silent installer for the EEM image, tails/validates eiam-install.log, hard-fails on non-zero RC.
-	•	configure_eem():
-	•	Secures/patches iGateway TLS (igateway.conf: ciphers, protocol, bind addresses).
-	•	Pulls secrets (bind/admin passwords) from AWS Secrets Manager and injects into EEM configs.
-	•	Writes LDAP settings into server.xml, preserves backups (*.ORIG).
-	•	eiam_cluster_setup(): builds a python venv, points pip to your Nexus indexes, installs boto3, and runs eiam_cluster_setup.py; fails loud on non-zero RC.
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eem_health.sh
+EOF
 
-System packages & agents
-	•	Installs yum prerequisites.
-	•	Optionally installs/sets up sssd for directory integration.
-	•	(You have a placeholder function name like install_cloudwatch_template in comments—currently not wiring monitoring; we’ll add that below.)
+  cat >/etc/systemd/system/eem-health.timer <<'EOF'
+[Unit]
+Description=Run EEM health probe every minute
 
-Systemd service deployment
-	•	Removes legacy gateway/dxserver init bits as needed.
-	•	Copies your unit file eem.service into /etc/systemd/system/eem.service.
-	•	systemctl daemon-reload + enable eem (so it starts at boot).
-	•	Orchestrates DX/iGateway restarts in the right order, runs your cluster refresh script, then final restart.
-	•	Fixes ownership/permissions for log directories.
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=eem-health.service
+AccuracySec=5s
+Persistent=true
 
-Script entrypoint
-	•	Gathers commons from S3 again in main, then calls the functions in order:
-	•	yum_requirements → setup_dsa_user → host/sssd → install EEM → place unit → configure EEM → start services.
-	•	Writes install markers to logs so SSM/GitLab can parse success.
+[Install]
+WantedBy=timers.target
+EOF
+
+  # 4) CloudWatch Agent config (procstat watches eem)
+  mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+  cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+{
+  "metrics": {
+    "append_dimensions": { "AutoScalingGroupName": "${aws:AutoScalingGroupName}", "InstanceId": "${aws:InstanceId}" },
+    "metrics_collected": {
+      "procstat": [
+        {
+          "pattern": "eem",
+          "measurement": ["pid_count"],
+          "metrics_collection_interval": 60
+        }
+      ]
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/messages", "log_group_name": "/autosys/health", "log_stream_name": "{instance_id}/messages", "timestamp_format": "%b %d %H:%M:%S" }
+        ]
+      }
+    }
+  }
+}
+EOF
+
+  # 5) Reload systemd and (re)start timer
+  systemctl daemon-reload
+  systemctl enable --now eem-health.timer
+
+  # 6) Start/refresh CloudWatch Agent if installed
+  if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl >/dev/null; then
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+  fi
+
+  # 7) (Optional, requires IAM perms) create an alarm on procstat metric
+  INSTANCE_ID="$(curl -s --fail --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id || true)"
+  if [[ -n "${INSTANCE_ID:-}" ]]; then
+    aws cloudwatch put-metric-alarm \
+      --alarm-name "eem-proc-down-${INSTANCE_ID}" \
+      --alarm-description "EEM process count is 0 on ${INSTANCE_ID}" \
+      --namespace "CWAgent" \
+      --metric-name "procstat_pid_count" \
+      --dimensions Name=InstanceId,Value="${INSTANCE_ID}" \
+      --statistic Average --period 60 --evaluation-periods 2 \
+      --threshold 1 --comparison-operator LessThanThreshold \
+      --treat-missing-data breaching \
+      --alarm-actions "${EEM_ALARM_SNS_ARN:-}" || true
+  fi
+}
