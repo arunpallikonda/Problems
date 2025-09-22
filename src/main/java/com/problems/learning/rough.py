@@ -114,3 +114,38 @@ systemctl enable eem
 install_eem_monitoring
 
 
+
+
+
+
+setup new
+
+install_eem_monitoring() {
+  set -euo pipefail
+
+  # Match your existing pattern where EEM files are staged under $EEM_DIR
+  # and you copy from there. Adjust if your staging variable differs.
+  MONITOR_DIR="$EEM_DIR/monitoring"
+
+  # 1) Copy the oneshot service & timer alongside how you install eem.service
+  #    (You already do: cp -vf $EEM_DIR/eem.service /etc/systemd/system/eem.service)
+  cp -vf "${MONITOR_DIR}/eem_health.service" /etc/systemd/system/eem_health.service
+  cp -vf "${MONITOR_DIR}/eem_health.timer"   /etc/systemd/system/eem_health.timer
+
+  # 2) Copy the probe script and make it executable (so the oneshot can run it)
+  cp -vf "${MONITOR_DIR}/eem_health.sh" /usr/local/bin/eem_health.sh
+  chmod 0755 /usr/local/bin/eem_health.sh
+
+  # 3) Tell systemd about new/changed units, then enable+start only the timer
+  systemctl daemon-reload
+  systemctl enable --now eem_health.timer
+
+  # Done. We don't touch eem.service here (you already enabled it just above).
+}
+
+
+cp -vf $EEM_DIR/eem.service /etc/systemd/system/eem.service
+systemctl daemon-reload
+systemctl enable eem
+install_eem_monitoring   # ← perfect place
+
