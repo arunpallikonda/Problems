@@ -68,3 +68,45 @@ install -m 0644 "$EEM_DIR/monitoring/svc-hb@.service"  /etc/systemd/system/svc-h
 systemctl daemon-reload
 # no need to enable globally; each main service starts its own instance
 
+
+
+
+
+
+
+alarm
+
+# exact log group name already receiving syslog/journal
+variable "log_group_name" { type = string }
+
+# list the services you want alarms for (unit filenames)
+variable "services" {
+  type    = list(string)
+  default = ["eem.service", "autoweb.service", "netagt.service"]
+}
+
+module "svc_ok_heartbeat_missing" {
+  for_each = toset(var.services)
+
+  source  = "terraform.fanniemae-org/monitoring/aws//modules/mon_aws/mon_cloudwatch_log_alarm"
+  version = ">=3.0.2"
+
+  app_shortname = var.appshortname
+  AlarmId       = "SvcHeartbeatMissing-${each.value}"
+  Description   = "${var.appshortname}: OK heartbeat missing for ${each.value}"
+  Severity      = "MINOR"
+
+  LogGroups      = [var.log_group_name]
+  # Must exactly match what the script writes:
+  FilterPatterns = ["\"AUTOSYS_HEALTH service=${each.value} status=OK\""]
+
+  MetricNamespace   = "AppLogMetrics/${var.appshortname}"
+  MetricName        = "${var.appshortname}-svc-ok-${replace(each.value, ".service", "")}"
+
+  Statistic          = "Sum"                 # count OK heartbeats
+  Period             = 60
+  Threshold          = 1                     # expect >=1 OK per minute
+  DatapointsToAlarm  = 1
+  EvaluationPeriods  = 2                     # 2 missing minutes => ALARM
+  ComparisonOperator = "LessThanThreshold"
+}
