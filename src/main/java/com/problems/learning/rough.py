@@ -1,93 +1,70 @@
-emm_health.sh
+svc_heartbeat.sh
 #!/usr/bin/env bash
-# EEM health probe (log-based heartbeat for CloudWatch log alarm)
+# ------------------------------------------------------------------------------
+# Generic systemd heartbeat sidecar.
+# Logs one line per minute to syslog for a *watched* unit (service).
+#
+# Usage:  svc_heartbeat.sh <unit-name>
+# Example: svc_heartbeat.sh eem.service
+#
+# Why logs? Your CloudWatch Agent already ships syslog/journal to your
+# CloudWatch Log Group, and your Terraform log->metric module builds alarms.
+# ------------------------------------------------------------------------------
 set -euo pipefail
-SVC_NAME="eem.service"
-TAG="AUTOSYS_HEALTH"     # keep tokens stable; TF filter matches this
-SERVICE_NAME="EEM"
 
-log() { logger -t autosys-health "$*"; }
+UNIT="${1:?usage: svc_heartbeat.sh <unit-name>}"    # e.g., "eem.service"
+TAG="AUTOSYS_HEALTH"                                 # TF FilterPattern matches this
+HOST="$(hostname -s)"
 
-if systemctl is-active --quiet "${SVC_NAME}"; then
-  log "${TAG} service=${SERVICE_NAME} status=OK"     # <-- alarm counts these
-  exit 0
-else
-  log "${TAG} service=${SERVICE_NAME} status=FAIL"   # for humans; alarm is “missing OK”
-  exit 2
-fi
+# Exit cleanly when systemd stops us (no zombies/orphans).
+trap 'exit 0' TERM INT
+
+while true; do
+  if systemctl is-active --quiet "${UNIT}"; then
+    # OK heartbeat (this is what the alarm counts)
+    logger -t autosys-health "${TAG} service=${UNIT} host=${HOST} status=OK"
+  else
+    # Optional FAIL breadcrumb for humans; alarm triggers on *missing OK*, not FAIL.
+    logger -t autosys-health "${TAG} service=${UNIT} host=${HOST} status=FAIL"
+  fi
+  sleep 60
+done
 
 
-
-
-
-eem_health.service
+svc-hb@.service
+# ------------------------------------------------------------------------------
+# Templated sidecar: one instance per watched unit.
+# Start with:   systemctl start svc-hb@eem.service
+# Teams don't call this directly; their .service starts it via ExecStartPost.
+# ------------------------------------------------------------------------------
 [Unit]
-Description=EEM health probe (writes heartbeat to syslog)
-Wants=eem.service
-After=eem.service
-ConditionPathExists=/usr/local/bin/eem_health.sh
+Description=Heartbeat sidecar for %i (writes to syslog for CW log alarm)
+# Keep lifecycle bound to the watched unit:
+BindsTo=%i
+PartOf=%i
+After=%i
 
 [Service]
-Type=oneshot
-ExecStart=/usr/local/bin/eem_health.sh
+Type=simple
+# %i expands to the instance name passed (e.g., "eem.service")
+ExecStart=/usr/local/bin/svc_heartbeat.sh %i
+Restart=always
+RestartSec=5s
 User=root
 Group=root
 
-
-
-
-eem_health.timer
-[Unit]
-Description=Run EEM health probe every minute
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
-Unit=eem_health.service
-AccuracySec=5s
-Persistent=true
-
 [Install]
-WantedBy=timers.target
+WantedBy=multi-user.target
 
 
 
+ExecStartPost=/bin/systemctl start svc-hb@%N.service
 
+# --- install shared heartbeat assets (one time per host) ---
+install -m 0755 "$EEM_DIR/monitoring/svc_heartbeat.sh" /usr/local/bin/svc_heartbeat.sh
+install -m 0644 "$EEM_DIR/monitoring/svc-hb@.service"  /etc/systemd/system/svc-hb@.service
 
-
-cw_alarm
-
-
-# Point this to the group that contained your CW_TEST line
-variable "log_group_name" {
-  type    = string
-  default = "atsyslab1-dev1-ess-System"  # <-- put the exact log group name here
-}
-
-module "eem_ok_heartbeat_missing" {
-  source  = "terraform.fanniemae-org/monitoring/aws//modules/mon_aws/mon_cloudwatch_log_alarm"
-  version = ">=3.0.2"   # or the version your registry requires
-
-  # org-standard fields (match your other alarms)
-  app_shortname = var.appshortname
-  AlarmId       = "ServiceHeartbeatMissing-EEM"
-  Description   = "${var.appshortname}-monitoring: EEM OK heartbeat missing"
-  Severity      = "MINOR"
-
-  # Log metric filter: COUNT the OK heartbeats from the script
-  LogGroups      = [var.log_group_name]
-  FilterPatterns = ["\"AUTOSYS_HEALTH service=EEM status=OK\""]
-
-  # Metric+alarm config (module creates both)
-  MetricNamespace   = "AppLogMetrics/${var.appshortname}"
-  MetricName        = "${var.appshortname}-monitoring-service-EEM"
-  Statistic          = "Sum"                 # count OKs
-  Threshold          = 1                     # expect >=1 OK per minute
-  DatapointsToAlarm  = 1
-  EvaluationPeriods  = 2                     # two consecutive minutes missing => ALARM
-  Period             = 60
-  ComparisonOperator = "LessThanThreshold"
-}
-
-
+# make new unit visible to systemd
+systemctl daemon-reload
+# no need to enable globally; each main service starts its own instance
 
