@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Data Masking Configurator</title>
+<style>
+  :root { --gap:12px; --pad:14px; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:0; background:#0b0f14; color:#e6edf3; }
+  header { padding:18px var(--pad); background:#121821; border-bottom:1px solid #1f2630; position:sticky; top:0; z-index:1; }
+  h1 { margin:0 0 4px; font-size:1.2rem; }
+  main { max-width:1100px; margin:0 auto; padding:20px var(--pad) 80px; }
+  .card { background:#11161f; border:1px solid #1f2630; border-radius:10px; padding:18px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns: repeat(12, 1fr); gap:var(--gap); }
+  .col-4{grid-column: span 4;} .col-6{grid-column: span 6;} .col-8{grid-column: span 8;} .col-12{grid-column: span 12;}
+  label { display:block; font-size:.9rem; margin-bottom:6px; color:#b7c0cc;}
+  input, select, textarea { width:100%; background:#0c121a; color:#e6edf3; border:1px solid #263143; border-radius:8px; padding:10px; }
+  small.mute { color:#8a97a8; }
+  .row { display:flex; gap:var(--gap); align-items:center; }
+  .btn { background:#2b66f6; color:white; border:none; border-radius:8px; padding:10px 14px; cursor:pointer; }
+  .btn.secondary { background:#1b2533; }
+  .btn.ghost { background:transparent; border:1px solid #2b66f6; color:#2b66f6; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#1b2533; color:#b7c0cc; font-size:.78rem; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { border-bottom:1px solid #1f2630; padding:10px; }
+  .err { color:#ff8f8f; font-size:.9rem; }
+  .ok { color:#6fe3a1; font-size:.95rem; }
+  .hide { display:none; }
+  .hl { border-color:#2b66f6 !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Data Masking Configurator</h1>
+  <div class="row">
+    <span class="pill">RDS</span>
+    <span class="pill">Redshift</span>
+    <span class="pill">S3 (CSV/Parquet)</span>
+    <span class="pill">DynamoDB</span>
+  </div>
+</header>
+
+<main>
+  <form id="cfgForm" autocomplete="off">
+    <!-- Project / Meta -->
+    <section class="card">
+      <h2 style="margin-top:0">Project & Meta</h2>
+      <div class="grid">
+        <div class="col-6">
+          <label>Project Name</label>
+          <input id="project" required placeholder="e.g., PII-Masking-2025Q4"/>
+        </div>
+        <div class="col-3">
+          <label>Environment</label>
+          <select id="env">
+            <option value="dev">dev</option><option value="test">test</option>
+            <option value="stage">stage</option><option value="prod">prod</option>
+          </select>
+        </div>
+        <div class="col-3">
+          <label>Owner Email</label>
+          <input id="owner" type="email" placeholder="owner@company.com"/>
+        </div>
+        <div class="col-4">
+          <label>Execution Engine</label>
+          <select id="engine">
+            <option value="masking">Masking Engine (Delphix)</option>
+            <option value="hyperscale">Hyperscale Compliance</option>
+            <option value="custom-boto3">Custom (boto3 / non-Delphix)</option>
+          </select>
+          <small class="mute">Pick Hyperscale for file-based scale-out jobs.</small>
+        </div>
+        <div class="col-4">
+          <label>Secrets Ref (no raw passwords)</label>
+          <input id="secretRef" placeholder="aws-secrets-manager:arn:aws:secretsmanager:..."/>
+        </div>
+        <div class="col-4">
+          <label>ServiceNow Ticket (optional)</label>
+          <input id="snTicket" placeholder="CHG0001234"/>
+        </div>
+      </div>
+    </section>
+
+    <!-- Source -->
+    <section class="card">
+      <h2 style="margin-top:0">Source</h2>
+      <div class="grid">
+        <div class="col-4">
+          <label>Source Type</label>
+          <select id="sourceType">
+            <option value="rds">RDS</option>
+            <option value="redshift">Redshift</option>
+            <option value="s3">S3 (Files)</option>
+            <option value="dynamodb">DynamoDB</option>
+          </select>
+        </div>
+        <div class="col-8">
+          <label>Notes (shown to users)</label>
+          <input id="notes" placeholder="Describe data, sensitivity, SLAs, etc."/>
+        </div>
+      </div>
+
+      <!-- RDS / Redshift -->
+      <div id="dbBlock" class="grid" style="margin-top:12px">
+        <div class="col-3">
+          <label>DB Engine</label>
+          <select id="dbEngine">
+            <option value="postgresql">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="sqlserver">SQL Server</option>
+            <option value="oracle">Oracle</option>
+            <option value="redshift">Redshift (Extended)</option>
+          </select>
+        </div>
+        <div class="col-3">
+          <label>Host / Endpoint</label>
+          <input id="dbHost" placeholder="xxx.region.rds.amazonaws.com"/>
+        </div>
+        <div class="col-2">
+          <label>Port</label>
+          <input id="dbPort" type="number" placeholder="5432"/>
+        </div>
+        <div class="col-2">
+          <label>DB Name</label>
+          <input id="dbName" placeholder="appdb"/>
+        </div>
+        <div class="col-2">
+          <label>Schema(s)</label>
+          <input id="dbSchemas" placeholder="public, sales"/>
+        </div>
+        <div class="col-6">
+          <label>Username (put password in Secrets)</label>
+          <input id="dbUser" placeholder="masker_svc"/>
+        </div>
+        <div class="col-6">
+          <label>Extra JDBC Props</label>
+          <input id="jdbcProps" placeholder="ssl=true&stringtype=unspecified"/>
+        </div>
+      </div>
+
+      <!-- S3 -->
+      <div id="s3Block" class="grid hide" style="margin-top:12px">
+        <div class="col-3">
+          <label>Bucket</label>
+          <input id="s3Bucket" placeholder="my-data-bucket"/>
+        </div>
+        <div class="col-5">
+          <label>Prefix / Folder</label>
+          <input id="s3Prefix" placeholder="incoming/customer/2025/"/>
+        </div>
+        <div class="col-2">
+          <label>Format</label>
+          <select id="s3Format">
+            <option>csv</option><option>parquet</option><option>jsonl</option>
+          </select>
+        </div>
+        <div class="col-2">
+          <label>Has Header (CSV)</label>
+          <select id="s3Header"><option>true</option><option>false</option></select>
+        </div>
+        <div class="col-3">
+          <label>Delimiter (CSV)</label>
+          <input id="s3Delim" placeholder="," />
+        </div>
+        <div class="col-3">
+          <label>Date Format (optional)</label>
+          <input id="s3DateFmt" placeholder="yyyy-MM-dd"/>
+        </div>
+        <div class="col-6">
+          <label>NPI Column Name(s) (comma-sep)</label>
+          <input id="s3Npi" placeholder="npi, provider_npi"/>
+        </div>
+      </div>
+
+      <!-- DynamoDB -->
+      <div id="ddbBlock" class="grid hide" style="margin-top:12px">
+        <div class="col-4">
+          <label>Table Name</label>
+          <input id="ddbTable" placeholder="customers"/>
+        </div>
+        <div class="col-4">
+          <label>Region</label>
+          <input id="ddbRegion" placeholder="us-east-1"/>
+        </div>
+        <div class="col-4">
+          <label>Key Schema</label>
+          <input id="ddbKeys" placeholder="pk, sk (optional)"/>
+        </div>
+        <div class="col-4">
+          <label>Processing Mode</label>
+          <select id="ddbMode">
+            <option value="in-place-boto3">In-place (boto3)</option>
+            <option value="export-hyperscale">Export→Hyperscale→Load</option>
+          </select>
+        </div>
+        <div class="col-8">
+          <label>Filter Expression (optional)</label>
+          <input id="ddbFilter" placeholder="begins_with(pk,'TENANT#42')"/>
+        </div>
+      </div>
+    </section>
+
+    <!-- Masking Rules -->
+    <section class="card">
+      <h2 style="margin-top:0">Masking Rules</h2>
+      <div class="grid">
+        <div class="col-3">
+          <label>Enable Profiling</label>
+          <select id="profiling"><option>true</option><option>false</option></select>
+        </div>
+        <div class="col-3">
+          <label>Consistency Scope</label>
+          <select id="consistency">
+            <option value="global">global</option>
+            <option value="dataset">dataset</option>
+            <option value="table">table</option>
+          </select>
+        </div>
+        <div class="col-3">
+          <label>Sample Rows (validation)</label>
+          <input id="sampleRows" type="number" value="1000"/>
+        </div>
+        <div class="col-3">
+          <label>Dry Run</label>
+          <select id="dryRun"><option>true</option><option>false</option></select>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <table id="ruleTable">
+          <thead>
+            <tr>
+              <th style="width:22%">Target (column or regex)</th>
+              <th style="width:20%">Algorithm</th>
+              <th style="width:30%">Params (JSON)</th>
+              <th style="width:20%">Notes</th>
+              <th style="width:8%"></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn" id="addRule">+ Add Rule</button>
+          <small class="mute">Target can be <code>exact_column</code> or <code>/regex/i</code>. Params validated for known algorithms.</small>
+        </div>
+      </div>
+    </section>
+
+    <!-- Partitioning -->
+    <section class="card">
+      <h2 style="margin-top:0">Workload Partitioning (optional)</h2>
+      <div class="grid">
+        <div class="col-4">
+          <label>Mode</label>
+          <select id="partMode">
+            <option value="auto">auto (Hyperscale only)</option>
+            <option value="single_engine">single_engine</option>
+            <option value="multi_engine_manual">multi_engine_manual</option>
+          </select>
+        </div>
+        <div class="col-8">
+          <label>Partitions (JSON array) — e.g., id ranges or table lists</label>
+          <textarea id="partitions" rows="3" placeholder='[{"engine":"engine-a","tables":["public.customer","public.order"]},{"engine":"engine-b","id_range":{"table":"public.order","start":1000000,"end":2000000}}]'></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- Validate & Download -->
+    <section class="card">
+      <div class="row">
+        <button type="button" class="btn" id="validateBtn">Validate</button>
+        <button type="button" class="btn ghost" id="downloadBtn">Download JSON</button>
+        <span id="status" style="margin-left:10px"></span>
+      </div>
+      <div id="errors" class="err" style="margin-top:10px"></div>
+    </section>
+  </form>
+</main>
+
+<script>
+const sourceType = document.getElementById('sourceType');
+const dbBlock   = document.getElementById('dbBlock');
+const s3Block   = document.getElementById('s3Block');
+const ddbBlock  = document.getElementById('ddbBlock');
+const ruleTbody = document.querySelector('#ruleTable tbody');
+const statusEl  = document.getElementById('status');
+const errsEl    = document.getElementById('errors');
+
+const algoCatalog = [
+  {id:'TOKENIZE_CONSISTENT', label:'Consistent Tokenization', needs:{seed:true}},
+  {id:'HASH_SHA256', label:'Hash (SHA-256)', needs:{salt:false}},
+  {id:'REDACT_FIXED', label:'Redact (fixed string)', needs:{value:true}},
+  {id:'NULLIFY', label:'Nullify', needs:{}},
+  {id:'RANDOM_INT_RANGE', label:'Random Integer (range)', needs:{min:true, max:true}},
+  {id:'RANDOM_DATE_SHIFT', label:'Random Date Shift', needs:{days:true}},
+  {id:'FAKER_FIRST_NAME', label:'Synthetic First Name', needs:{}},
+  {id:'FAKER_LAST_NAME', label:'Synthetic Last Name', needs:{}},
+  {id:'FAKER_EMAIL', label:'Synthetic Email', needs:{domain:false}},
+  {id:'NPI_TOKENIZE', label:'NPI Tokenize (consistent)', needs:{seed:true}},
+  {id:'CUSTOM', label:'Custom (provide params JSON)', needs:{custom:true}}
+];
+
+function setBlocks(){
+  dbBlock.classList.add('hide'); s3Block.classList.add('hide'); ddbBlock.classList.add('hide');
+  if(sourceType.value==='rds' || sourceType.value==='redshift'){ dbBlock.classList.remove('hide'); }
+  if(sourceType.value==='s3'){ s3Block.classList.remove('hide'); }
+  if(sourceType.value==='dynamodb'){ ddbBlock.classList.remove('hide'); }
+}
+sourceType.addEventListener('change', setBlocks); setBlocks();
+
+function algoSelectHtml(){
+  return `<select class="algo">
+    ${algoCatalog.map(a=>`<option value="${a.id}">${a.label}</option>`).join('')}
+  </select>`;
+}
+
+function addRuleRow(){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input class="target" placeholder="customer_email or /.*_ssn$/"/></td>
+    <td>${algoSelectHtml()}</td>
+    <td><input class="params" placeholder='{"seed":42}' /></td>
+    <td><input class="note" placeholder="why/how"/></td>
+    <td><button type="button" class="btn secondary del">✕</button></td>`;
+  ruleTbody.appendChild(tr);
+  tr.querySelector('.del').onclick = ()=> tr.remove();
+}
+document.getElementById('addRule').onclick = addRuleRow;
+addRuleRow();
+
+function valStr(id){ return (document.getElementById(id).value || '').trim(); }
+function valNum(id){ const v=Number(document.getElementById(id).value); return Number.isFinite(v)?v:undefined; }
+function valBoolSel(id){ return document.getElementById(id).value === 'true'; }
+
+function gather(){
+  const srcType = valStr('sourceType');
+  const base = {
+    meta:{
+      project: valStr('project'),
+      env: valStr('env'),
+      owner: valStr('owner'),
+      version: 1
+    },
+    engine: valStr('engine'),
+    secrets: { ref: valStr('secretRef') },
+    service_now: { ticket: valStr('snTicket') || null },
+    source:{ type: srcType, notes: valStr('notes') },
+    masking:{
+      profiling: valBoolSel('profiling'),
+      consistency_scope: valStr('consistency'),
+      rules: []
+    },
+    validation:{
+      dry_run: valBoolSel('dryRun'),
+      sample_rows: valNum('sampleRows') || 1000,
+      post_checks: ["rowcount","nulls","regex"]
+    },
+    workload_partitioning:{
+      mode: valStr('partMode'),
+      partitions: (()=>{ try{ return JSON.parse(valStr('partitions')||'[]'); }catch{ return []; } })()
+    }
+  };
+
+  // source-specific blocks
+  if(srcType==='rds' || srcType==='redshift'){
+    base.source.db = {
+      engine: valStr('dbEngine'),
+      host: valStr('dbHost'),
+      port: valNum('dbPort'),
+      name: valStr('dbName'),
+      schemas: valStr('dbSchemas').split(',').map(s=>s.trim()).filter(Boolean),
+      username: valStr('dbUser'),
+      jdbc_props: valStr('jdbcProps')
+    };
+  } else if(srcType==='s3'){
+    base.source.s3 = {
+      bucket: valStr('s3Bucket'),
+      prefix: valStr('s3Prefix'),
+      format: valStr('s3Format'),
+      has_header: valStr('s3Header')==='true',
+      delimiter: valStr('s3Delim') || ',',
+      date_format: valStr('s3DateFmt') || null,
+      npi_columns: valStr('s3Npi').split(',').map(s=>s.trim()).filter(Boolean)
+    };
+  } else if(srcType==='dynamodb'){
+    base.source.dynamodb = {
+      table: valStr('ddbTable'),
+      region: valStr('ddbRegion'),
+      key_schema: valStr('ddbKeys'),
+      mode: valStr('ddbMode'),
+      filter_expression: valStr('ddbFilter') || null
+    };
+  }
+
+  // rules
+  for(const tr of ruleTbody.querySelectorAll('tr')){
+    const tgt = tr.querySelector('.target').value.trim();
+    const algo = tr.querySelector('.algo').value;
+    const paramsRaw = tr.querySelector('.params').value.trim();
+    const note = tr.querySelector('.note').value.trim();
+    let params = {};
+    if(paramsRaw){
+      try { params = JSON.parse(paramsRaw); }
+      catch { params = {__INVALID__: paramsRaw}; }
+    }
+    base.masking.rules.push({ target:tgt, algorithm:algo, params, note });
+  }
+
+  return base;
+}
+
+function validate(cfg){
+  const errs = [];
+
+  // Meta
+  if(!cfg.meta.project) errs.push("Project is required.");
+  if(!cfg.secrets.ref) errs.push("Secrets Ref is required (no raw passwords).");
+
+  // Source
+  switch(cfg.source.type){
+    case 'rds':
+      // fallthrough
+    case 'redshift':
+      {
+        const d = cfg.source.db||{};
+        ['engine','host','port','name','username'].forEach(k => { if(!d[k]) errs.push(`DB: ${k} is required.`); });
+        if(d.engine==='redshift' && cfg.engine==='hyperscale'){
+          errs.push("Redshift + Hyperscale: not supported for direct JDBC. Use S3 file flow.");
+        }
+      }
+      break;
+    case 's3':
+      {
+        const s = cfg.source.s3||{};
+        if(!s.bucket) errs.push("S3: bucket is required.");
+        if(!s.prefix) errs.push("S3: prefix is required.");
+        if(s.format==='csv' && s.has_header===false) errs.push("CSV without header is not supported here—provide headers or switch to parquet/jsonl.");
+      }
+      break;
+    case 'dynamodb':
+      {
+        const d = cfg.source.dynamodb||{};
+        if(!d.table) errs.push("DynamoDB: table is required.");
+        if(!d.region) errs.push("DynamoDB: region is required.");
+        if(d.mode==='export-hyperscale' && cfg.engine!=='hyperscale'){
+          errs.push("DynamoDB export flow requires Hyperscale engine selection.");
+        }
+      }
+      break;
+    default:
+      errs.push("Unknown source type.");
+  }
+
+  // Rules
+  if(!cfg.masking.rules.length) errs.push("Add at least one masking rule.");
+  cfg.masking.rules.forEach((r,i)=>{
+    if(!r.target) errs.push(`Rule #${i+1}: target is required.`);
+    // algo param checks
+    const spec = algoCatalog.find(a=>a.id===r.algorithm);
+    if(spec){
+      if(spec.needs.seed && r.params.seed==null) errs.push(`Rule #${i+1}: ${spec.label} requires "seed".`);
+      if(spec.needs.value && !r.params.value) errs.push(`Rule #${i+1}: ${spec.label} requires "value".`);
+      if(spec.needs.min && r.params.min==null) errs.push(`Rule #${i+1}: Random Int requires "min".`);
+      if(spec.needs.max && r.params.max==null) errs.push(`Rule #${i+1}: Random Int requires "max".`);
+      if(spec.needs.days && r.params.days==null) errs.push(`Rule #${i+1}: Date Shift requires "days".`);
+      if(spec.id==='CUSTOM' && (!r.params || r.params.__INVALID__)) errs.push(`Rule #${i+1}: Custom requires valid JSON params.`);
+    }
+  });
+
+  // Partitioning
+  if(cfg.workload_partitioning.mode==='multi_engine_manual' && !cfg.workload_partitioning.partitions.length){
+    errs.push("Provide partitions for multi_engine_manual.");
+  }
+
+  return errs;
+}
+
+document.getElementById('validateBtn').onclick = ()=>{
+  const cfg = gather();
+  const errs = validate(cfg);
+  errsEl.innerHTML = errs.map(e=>`• ${e}`).join('<br/>');
+  statusEl.innerHTML = errs.length ? `<span class="err">Found ${errs.length} issue(s)</span>` : `<span class="ok">Validation passed ✔</span>`;
+  window.scrollTo({top:document.body.scrollHeight, behavior:'smooth'});
+};
+
+document.getElementById('downloadBtn').onclick = ()=>{
+  const cfg = gather();
+  const errs = validate(cfg);
+  errsEl.innerHTML = errs.map(e=>`• ${e}`).join('<br/>');
+  if(errs.length){ statusEl.innerHTML = `<span class="err">Fix errors before download.</span>`; return; }
+  const blob = new Blob([JSON.stringify(cfg,null,2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${cfg.meta.project || 'masking-config'}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  statusEl.innerHTML = `<span class="ok">JSON downloaded.</span>`;
+};
+</script>
+</body>
+</html>
