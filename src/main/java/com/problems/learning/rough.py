@@ -1,51 +1,67 @@
 import os
 import json
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from boto3.dynamodb.conditions import Attr
 
-# ---------- Env ----------
-DDB_TABLE = os.environ["EXECUTIONS_TABLE"]                # e.g., tdm-dynamo-sdg-executions
-P2X_LAMBDA_ARN = os.environ["P2X_LAMBDA_ARN"]             # cross-account allowed via Lambda resource policy
+# =============================================================================
+# ENV
+# =============================================================================
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
-# Optional tuning
+DDB_TABLE = os.environ["EXECUTIONS_TABLE"]          # e.g., tdm-dynamo-sdg-executions
+P2X_LAMBDA_ARN = os.environ["P2X_LAMBDA_ARN"]        # cross-account invoke allowed
+
+# Dynamo keys/attrs (adjust to your table schema)
+DDB_PK_ATTR = os.environ.get("DDB_PK_ATTR", "executionId")
+DDB_STATUS_ATTR = os.environ.get("DDB_STATUS_ATTR", "status")
+
+# Dual-ID fields we store
+DDB_REPO_QID_ATTR = os.environ.get("DDB_REPO_QID_ATTR", "repoQueueId")
+DDB_EXEC_QID_ATTR = os.environ.get("DDB_EXEC_QID_ATTR", "execQueueId")
+
+# Orchestration statuses
+STATUS_NEW = os.environ.get("STATUS_NEW", "NEW")
+STATUS_PROCESSING = os.environ.get("STATUS_PROCESSING", "PROCESSING")
+STATUS_COMPLETE = os.environ.get("STATUS_COMPLETE", "GENERATION_COMPLETE")
+STATUS_FAILED = os.environ.get("STATUS_FAILED", "FAILED")
+
+# Limits per run
 MAX_NEW_PER_RUN = int(os.environ.get("MAX_NEW_PER_RUN", "5"))
 MAX_PROCESSING_PER_RUN = int(os.environ.get("MAX_PROCESSING_PER_RUN", "25"))
-DDB_STATUS_ATTR = os.environ.get("DDB_STATUS_ATTR", "status")
-DDB_QUEUEID_ATTR = os.environ.get("DDB_QUEUEID_ATTR", "queueId")
-DDB_PK_ATTR = os.environ.get("DDB_PK_ATTR", "executionId")  # adjust to your table key
 
-# Status values used in DDB
-STATUS_NEW = "NEW"
-STATUS_PROCESSING = "PROCESSING"
-STATUS_FAILED = "FAILED"
-STATUS_COMPLETE = "GENERATION_COMPLETE"  # or whatever your terminal success is
+# If your repo-queue/history item contains a link to an execution ID, list the possible field names here.
+# (Docs don't guarantee these; your env might use one of them.)
+REPO_TO_EXEC_LINK_FIELDS = [
+    f.strip() for f in os.environ.get(
+        "REPO_TO_EXEC_LINK_FIELDS",
+        "executionQueueId,execQueueId,gmuxQueueId,executionId,jobQueueId"
+    ).split(",")
+    if f.strip()
+]
 
-# What we store as the "GMUS observed state" (separate from orchestration status)
-OBS_ACTIVE = "ACTIVE"
-OBS_TERMINAL_SUCCESS = "TERMINAL_SUCCESS"
-OBS_TERMINAL_FAIL = "TERMINAL_FAIL"
-OBS_UNKNOWN = "UNKNOWN"
-
+# =============================================================================
+# AWS CLIENTS
+# =============================================================================
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 ddb_table = dynamodb.Table(DDB_TABLE)
 
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 
+# =============================================================================
+# UTIL
+# =============================================================================
+OBS_ACTIVE = "ACTIVE"
+OBS_TERMINAL_SUCCESS = "TERMINAL_SUCCESS"
+OBS_TERMINAL_FAIL = "TERMINAL_FAIL"
+OBS_UNKNOWN = "UNKNOWN"
 
-# ---------- Helpers ----------
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def invoke_p2x(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Invokes P2X Lambda synchronously and returns parsed JSON.
-    Requires cross-account invoke permission + correct IAM on this Lambda.
-    """
     resp = lambda_client.invoke(
         FunctionName=P2X_LAMBDA_ARN,
         InvocationType="RequestResponse",
@@ -54,123 +70,90 @@ def invoke_p2x(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw = resp["Payload"].read()
     if not raw:
         raise RuntimeError("Empty response from P2X")
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Sometimes Lambda wraps response in 'body'
-        raise RuntimeError(f"Non-JSON response from P2X: {raw[:300]!r}")
+    data = json.loads(raw)
 
-    # Handle common proxy-style wrapping
-    if isinstance(data, dict) and "body" in data:
+    # Support APIGW-style wrapping
+    if isinstance(data, dict) and "body" in data and isinstance(data["body"], str):
         try:
             return json.loads(data["body"])
         except Exception:
             return data
-
     return data
 
 def safe_get_list(resp: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
     """
-    Your screenshot shows:
+    Expected shapes:
       "list_queue": {"success": true, "data": [...]}
+      OR sometimes directly a list
     """
-    node = resp.get(key) or {}
+    node = resp.get(key)
     if isinstance(node, dict) and node.get("success") is True:
         return node.get("data") or []
-    # allow direct list too
     if isinstance(node, list):
         return node
     return []
 
+def extract_queue_id(item: Dict[str, Any]) -> Optional[str]:
+    """
+    Normalize common queue id keys.
+    """
+    for k in ("queueId", "queueID", "id"):
+        if k in item and item[k] is not None:
+            return str(item[k])
+    return None
+
 def index_by_queue_id(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """
-    GMUS responses vary; we try common keys: queueId, queueID, id
-    """
-    out = {}
+    out: Dict[str, Dict[str, Any]] = {}
     for it in items:
-        qid = (
-            str(it.get("queueId"))
-            if it.get("queueId") is not None
-            else str(it.get("queueID")) if it.get("queueID") is not None
-            else str(it.get("id")) if it.get("id") is not None
-            else None
-        )
-        if qid and qid != "None":
+        qid = extract_queue_id(it)
+        if qid:
             out[qid] = it
     return out
 
-def classify_job(queue_item: Dict[str, Any], default_active: bool) -> Tuple[str, str]:
+def classify_job(queue_item: Dict[str, Any], in_active_list: bool) -> Tuple[str, str]:
     """
-    Returns (observed_state, detail_status_string).
-    Because GMUS fields can differ, we use heuristics.
-    - For active queues, treat as ACTIVE unless explicit completion.
-    - For history queues, treat as TERMINAL; check success/fail fields if present.
+    Heuristic classification; tighten once you see real GMUS fields.
     """
-    # Common possible fields (varies by GMUS / org wrapper)
     status = str(queue_item.get("status") or queue_item.get("state") or "").upper()
     result = str(queue_item.get("result") or "").upper()
     error = queue_item.get("error") or queue_item.get("errorMessage") or queue_item.get("exception")
 
-    # If it explicitly says failed
-    if "FAIL" in status or "ERROR" in status or error:
-        return (OBS_TERMINAL_FAIL if not default_active else OBS_ACTIVE, status or "FAILED")
+    # failure signals
+    if error or "FAIL" in status or "ERROR" in status:
+        return (OBS_ACTIVE, status or "FAILED") if in_active_list else (OBS_TERMINAL_FAIL, status or "FAILED")
 
-    # If it explicitly says completed/success
+    # success/complete signals
     if "COMPLETE" in status or "SUCCESS" in status or result == "SUCCESS":
-        return (OBS_TERMINAL_SUCCESS if not default_active else OBS_ACTIVE, status or "COMPLETED")
+        return (OBS_ACTIVE, status or "COMPLETED") if in_active_list else (OBS_TERMINAL_SUCCESS, status or "COMPLETED")
 
-    # If in active list, treat as ACTIVE (WAITING/RUNNING unknown granularity)
-    if default_active:
-        # Try to differentiate waiting vs running if a field exists
+    # active list: assume ACTIVE
+    if in_active_list:
         if "WAIT" in status or "PENDING" in status or "QUEUED" in status:
             return (OBS_ACTIVE, status or "WAITING")
         if "RUN" in status or "EXEC" in status or "PROCESS" in status:
             return (OBS_ACTIVE, status or "RUNNING")
         return (OBS_ACTIVE, status or "ACTIVE")
 
-    # In history but no explicit success/fail → terminal unknown; assume success unless fields show otherwise
+    # history list but no explicit markers: assume terminal success
     return (OBS_TERMINAL_SUCCESS, status or "COMPLETED")
 
-def determine_queueid_status(queue_id: str, list_resp: Dict[str, Any]) -> Tuple[str, str, str]:
+def try_discover_exec_id_from_repo_item(repo_item: Dict[str, Any]) -> Optional[str]:
     """
-    Uses four lists:
-      list_queue, list_queue_history, list_repo_queue, list_repo_queue_history
-
-    Returns:
-      (observed_state, observed_detail, source_bucket)
-    where source_bucket tells which list we found it in.
+    If your environment includes a link field, return it.
+    Docs don't guarantee this; it's environment-specific.
     """
-    active_main = index_by_queue_id(safe_get_list(list_resp, "list_queue"))
-    hist_main = index_by_queue_id(safe_get_list(list_resp, "list_queue_history"))
-    active_repo = index_by_queue_id(safe_get_list(list_resp, "list_repo_queue"))
-    hist_repo = index_by_queue_id(safe_get_list(list_resp, "list_repo_queue_history"))
+    for f in REPO_TO_EXEC_LINK_FIELDS:
+        v = repo_item.get(f)
+        if v is not None and str(v).strip():
+            return str(v)
+    return None
 
-    qid = str(queue_id)
-
-    if qid in active_main:
-        obs, detail = classify_job(active_main[qid], default_active=True)
-        return obs, detail, "list_queue"
-
-    if qid in active_repo:
-        obs, detail = classify_job(active_repo[qid], default_active=True)
-        return obs, detail, "list_repo_queue"
-
-    if qid in hist_main:
-        obs, detail = classify_job(hist_main[qid], default_active=False)
-        return obs, detail, "list_queue_history"
-
-    if qid in hist_repo:
-        obs, detail = classify_job(hist_repo[qid], default_active=False)
-        return obs, detail, "list_repo_queue_history"
-
-    return OBS_UNKNOWN, "NOT_FOUND", "none"
-
-
-# ---------- DDB access ----------
+# =============================================================================
+# DDB HELPERS
+# =============================================================================
 def scan_by_status(status_value: str, limit: int) -> List[Dict[str, Any]]:
     """
-    For simplicity, uses Scan with FilterExpression.
-    For production, prefer a GSI on status (much cheaper).
+    Uses Scan for simplicity. Prefer a GSI on status in production.
     """
     items: List[Dict[str, Any]] = []
     last_key = None
@@ -192,67 +175,105 @@ def scan_by_status(status_value: str, limit: int) -> List[Dict[str, Any]]:
     return items[:limit]
 
 def update_execution(execution_id: str, updates: Dict[str, Any]) -> None:
-    """
-    Updates attributes on the item identified by executionId (PK).
-    Adjust if you have a sort key.
-    """
-    # Build UpdateExpression
     expr_parts = []
     expr_attr_values = {}
     expr_attr_names = {}
 
     for k, v in updates.items():
-        name_key = f"#{k}"
-        value_key = f":{k}"
-        expr_attr_names[name_key] = k
-        expr_attr_values[value_key] = v
-        expr_parts.append(f"{name_key} = {value_key}")
-
-    update_expr = "SET " + ", ".join(expr_parts)
+        nk = f"#{k}"
+        vk = f":{k}"
+        expr_attr_names[nk] = k
+        expr_attr_values[vk] = v
+        expr_parts.append(f"{nk} = {vk}")
 
     ddb_table.update_item(
         Key={DDB_PK_ATTR: execution_id},
-        UpdateExpression=update_expr,
+        UpdateExpression="SET " + ", ".join(expr_parts),
         ExpressionAttributeNames=expr_attr_names,
         ExpressionAttributeValues=expr_attr_values,
     )
 
+# =============================================================================
+# STATUS RESOLUTION (DUAL ID)
+# =============================================================================
+def resolve_status_dual_ids(
+    repo_qid: Optional[str],
+    exec_qid: Optional[str],
+    list_resp: Dict[str, Any]
+) -> Tuple[str, str, str, Optional[str]]:
+    """
+    Returns:
+      (observedState, observedDetail, observedSourceListName, discoveredExecQueueId_if_any)
 
-# ---------- Orchestration ----------
+    Priority:
+      - if exec_qid exists: check list_queue, list_queue_history first
+      - else check repo lists for repo_qid
+      - also attempt to discover exec id from repo items if possible
+    """
+    lq = index_by_queue_id(safe_get_list(list_resp, "list_queue"))
+    lqh = index_by_queue_id(safe_get_list(list_resp, "list_queue_history"))
+    lrq = index_by_queue_id(safe_get_list(list_resp, "list_repo_queue"))
+    lrqh = index_by_queue_id(safe_get_list(list_resp, "list_repo_queue_history"))
+
+    # 1) Prefer exec queue id if present
+    if exec_qid:
+        if exec_qid in lq:
+            obs, detail = classify_job(lq[exec_qid], in_active_list=True)
+            return obs, detail, "list_queue", None
+        if exec_qid in lqh:
+            obs, detail = classify_job(lqh[exec_qid], in_active_list=False)
+            return obs, detail, "list_queue_history", None
+
+    # 2) Fall back to repo queue id
+    discovered_exec = None
+    if repo_qid:
+        if repo_qid in lrq:
+            # Try discover exec id link (if any) even while active
+            discovered_exec = try_discover_exec_id_from_repo_item(lrq[repo_qid])
+            obs, detail = classify_job(lrq[repo_qid], in_active_list=True)
+            return obs, detail, "list_repo_queue", discovered_exec
+
+        if repo_qid in lrqh:
+            discovered_exec = try_discover_exec_id_from_repo_item(lrqh[repo_qid])
+            obs, detail = classify_job(lrqh[repo_qid], in_active_list=False)
+            return obs, detail, "list_repo_queue_history", discovered_exec
+
+    return OBS_UNKNOWN, "NOT_FOUND", "none", None
+
+# =============================================================================
+# ORCHESTRATION
+# =============================================================================
 def handle_new_executions() -> Dict[str, int]:
     started = 0
     failed = 0
 
-    new_items = scan_by_status(STATUS_NEW, MAX_NEW_PER_RUN)
-
-    for item in new_items:
+    items = scan_by_status(STATUS_NEW, MAX_NEW_PER_RUN)
+    for item in items:
         execution_id = item[DDB_PK_ATTR]
 
         try:
-            # P2X execute: P2P passes along the execution context you already store.
-            p2x_payload = {
-                "cmdType": "execute",
-                "execution": item,  # pass full item or a reduced subset
-            }
-            p2x_resp = invoke_p2x(p2x_payload)
+            # Submit to P2X (execute mode)
+            resp = invoke_p2x({"cmdType": "execute", "execution": item})
 
-            # Expect P2X returns queueId somewhere
-            queue_id = (
-                p2x_resp.get("queueId")
-                or p2x_resp.get("queueID")
-                or (p2x_resp.get("data") or {}).get("queueId")
-            )
-            if not queue_id:
-                raise RuntimeError(f"P2X execute did not return queueId. resp keys={list(p2x_resp.keys())}")
+            # P2X may return queueId only (common), or may distinguish repoQueueId/execQueueId.
+            # We handle all possibilities.
+            queue_id = resp.get("queueId") or resp.get("queueID")
+            repo_qid = resp.get("repoQueueId") or queue_id
+            exec_qid = resp.get("execQueueId")
 
-            update_execution(execution_id, {
+            updates = {
                 DDB_STATUS_ATTR: STATUS_PROCESSING,
-                DDB_QUEUEID_ATTR: str(queue_id),
                 "updatedAt": utc_now_iso(),
                 "observedState": OBS_ACTIVE,
                 "observedDetail": "SUBMITTED",
                 "observedSource": "execute",
-            })
+            }
+            if repo_qid:
+                updates[DDB_REPO_QID_ATTR] = str(repo_qid)
+            if exec_qid:
+                updates[DDB_EXEC_QID_ATTR] = str(exec_qid)
+
+            update_execution(execution_id, updates)
             started += 1
 
         except Exception as e:
@@ -271,62 +292,58 @@ def handle_processing_executions() -> Dict[str, int]:
     checked = 0
     changed = 0
 
-    processing_items = scan_by_status(STATUS_PROCESSING, MAX_PROCESSING_PER_RUN)
-    if not processing_items:
+    items = scan_by_status(STATUS_PROCESSING, MAX_PROCESSING_PER_RUN)
+    if not items:
         return {"checked": 0, "changed": 0}
 
-    # One listQueue call can cover many executions (cheaper than per-queueId calls)
+    # Single call to P2X to fetch all queues
     list_resp = invoke_p2x({"cmdType": "listQueue"})
 
-    for item in processing_items:
+    for item in items:
         execution_id = item[DDB_PK_ATTR]
-        queue_id = item.get(DDB_QUEUEID_ATTR)
+        repo_qid = item.get(DDB_REPO_QID_ATTR)
+        exec_qid = item.get(DDB_EXEC_QID_ATTR)
 
-        if not queue_id:
-            # Bad state; mark failed or unknown
-            update_execution(execution_id, {
-                DDB_STATUS_ATTR: STATUS_FAILED,
-                "updatedAt": utc_now_iso(),
-                "observedState": OBS_TERMINAL_FAIL,
-                "observedDetail": "MISSING_QUEUE_ID",
-            })
-            changed += 1
-            continue
-
-        obs_state, obs_detail, obs_source = determine_queueid_status(str(queue_id), list_resp)
+        obs_state, obs_detail, obs_src, discovered_exec = resolve_status_dual_ids(
+            str(repo_qid) if repo_qid else None,
+            str(exec_qid) if exec_qid else None,
+            list_resp
+        )
         checked += 1
 
         prev_obs_state = item.get("observedState")
         prev_obs_detail = item.get("observedDetail")
+        prev_exec_qid = item.get(DDB_EXEC_QID_ATTR)
 
-        # Update only when there is a meaningful change
-        if obs_state != prev_obs_state or obs_detail != prev_obs_detail:
-            updates = {
+        updates: Dict[str, Any] = {}
+        # Update when state/detail changed OR we discovered exec id
+        if (obs_state != prev_obs_state) or (obs_detail != prev_obs_detail) or (discovered_exec and not prev_exec_qid):
+            updates.update({
                 "updatedAt": utc_now_iso(),
                 "observedState": obs_state,
                 "observedDetail": obs_detail,
-                "observedSource": obs_source,
-            }
+                "observedSource": obs_src,
+            })
 
-            # Map observed terminal state to orchestration status
+            # If we can learn exec id from repo items, persist it
+            if discovered_exec and not prev_exec_qid:
+                updates[DDB_EXEC_QID_ATTR] = str(discovered_exec)
+
+            # Map terminal to orchestration status
             if obs_state == OBS_TERMINAL_SUCCESS:
                 updates[DDB_STATUS_ATTR] = STATUS_COMPLETE
             elif obs_state == OBS_TERMINAL_FAIL:
                 updates[DDB_STATUS_ATTR] = STATUS_FAILED
             elif obs_state == OBS_UNKNOWN:
-                # Keep PROCESSING but record unknown; you can add retry counters here
-                updates["unknownSince"] = item.get("unknownSince") or utc_now_iso()
+                # remain PROCESSING but annotate
+                updates.setdefault("unknownSince", item.get("unknownSince") or utc_now_iso())
 
             update_execution(execution_id, updates)
             changed += 1
 
     return {"checked": checked, "changed": changed}
 
-
 def lambda_handler(event, context):
-    """
-    Run by EventBridge schedule every minute (recommended).
-    """
     results = {
         "new": handle_new_executions(),
         "processing": handle_processing_executions(),
